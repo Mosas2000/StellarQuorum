@@ -162,6 +162,18 @@ const xdr = await client.buildVote(voterAddress, 1n, 1); // Vote For on proposal
 
 Quorum participates in the **Stellar Wave** on [Drips Network](https://www.drips.network/wave).
 
+Rewarded issues use `drips:*` labels to show the expected points value:
+
+| Label | Scope |
+|---|---|
+| `drips:1` | Small tasks such as docs, styling, and good first issues |
+| `drips:3` | Medium tasks such as new components or focused test coverage |
+| `drips:5` | Large tasks such as new pages or contract functions |
+| `drips:8` | Complex tasks such as full features or security-sensitive work |
+
+See [docs/contributing.md](docs/contributing.md#drips-wave) for the contributor
+claim flow and maintainer setup checklist.
+
 **Good first issues:**
 - Build the Freighter wallet connection component
 - Write the Soroban governance contract `cancel()` function
