@@ -89,8 +89,6 @@ impl QuorumToken {
         env.storage().persistent().get(&DataKey::Allowance(owner, spender)).unwrap_or(0)
     }
 
-    // TODO: implement delegate() for voting power delegation
-    // TODO: implement delegate() for voting power delegation
     pub fn transfer_admin(env: Env, new_admin: Address) -> Result<(), TokenError> {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
