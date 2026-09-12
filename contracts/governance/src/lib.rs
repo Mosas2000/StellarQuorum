@@ -1,5 +1,14 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, contracterror, Address, Env, String};
+use soroban_sdk::{contract, contractclient, contractimpl, contracttype, contracterror, Address, Env, String};
+
+/// Subset of the QUORUM token interface the governor depends on.
+///
+/// Generates `TokenClient`, used to cross-invoke the token contract at the
+/// address held in `Config::token`.
+#[contractclient(name = "TokenClient")]
+pub trait TokenInterface {
+    fn total_supply(env: Env) -> i128;
+}
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -17,7 +26,11 @@ pub enum GovernanceError {
     InvalidVoteChoice       = 10,
     VotingPeriodEnded       = 11,
     TimelockNotExpired      = 12,
+    Overflow                = 13,
 }
+
+/// Basis-point denominator: `quorum_bps` of 500 means 5% of total supply.
+const BPS_DENOMINATOR: i128 = 10_000;
 
 #[contracttype]
 #[derive(Clone, PartialEq)]
@@ -84,6 +97,10 @@ impl GovernanceContract {
         let id = count + 1;
         let current = env.ledger().sequence();
         let config: Config = env.storage().instance().get(&DataKey::Config).unwrap();
+        let quorum_required = Self::quorum_for_supply(
+            TokenClient::new(&env, &config.token).total_supply(),
+            config.quorum_bps,
+        )?;
         let proposal = Proposal {
             id, proposer, title, description,
             for_votes: 0, against_votes: 0, abstain_votes: 0,
@@ -91,7 +108,7 @@ impl GovernanceContract {
             start_ledger: current + 1,
             end_ledger: current + 1 + config.voting_period,
             queue_ledger: 0,
-            quorum_required: 0, // TODO: calc from total_supply * quorum_bps / 10000
+            quorum_required,
             status: ProposalStatus::Active,
         };
         env.storage().persistent().set(&DataKey::Proposal(id), &proposal);
@@ -177,5 +194,24 @@ impl GovernanceContract {
         Ok(())
     }
 }
+/// Internal helpers — outside `#[contractimpl]` so they are not exported as
+/// contract functions.
+impl GovernanceContract {
+    /// Quorum threshold for a given circulating supply: `supply * bps / 10000`.
+    ///
+    /// Integer division truncates, so the threshold is never rounded up beyond
+    /// what the supply supports. Uses checked arithmetic because a large supply
+    /// multiplied by `quorum_bps` can exceed `i128::MAX`.
+    fn quorum_for_supply(total_supply: i128, quorum_bps: u32) -> Result<i128, GovernanceError> {
+        total_supply
+            .checked_mul(i128::from(quorum_bps))
+            .map(|scaled| scaled / BPS_DENOMINATOR)
+            .ok_or(GovernanceError::Overflow)
+    }
+}
+
+#[cfg(test)]
+mod test;
+
 // TODO: add delegate() for voting power delegation
 // TODO: add get_past_votes(address, ledger) for snapshot-based power

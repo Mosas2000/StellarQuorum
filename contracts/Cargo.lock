@@ -1054,6 +1054,7 @@ dependencies = [
 name = "quorum-governance"
 version = "0.1.0"
 dependencies = [
+ "quorum-token",
  "soroban-sdk",
 ]
 
