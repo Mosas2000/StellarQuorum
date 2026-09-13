@@ -1,6 +1,6 @@
 use super::*;
 use quorum_token::{QuorumToken, QuorumTokenClient};
-use soroban_sdk::testutils::Address as _;
+use soroban_sdk::testutils::{Address as _, Ledger as _};
 
 const QUORUM_BPS: u32 = 500; // 5%
 const VOTING_PERIOD: u32 = 100;
@@ -80,6 +80,81 @@ fn quorum_bps_of_zero_yields_no_threshold() {
     let proposer = Address::generate(&env);
 
     assert_eq!(propose(&env, &governance_id, &proposer).quorum_required, 0);
+}
+
+const VOTE_FOR: u32 = 1;
+
+#[test]
+fn voting_power_is_read_at_the_snapshot_not_the_live_balance() {
+    let env = Env::default();
+    env.ledger().set_sequence_number(10);
+    let (admin, token_id, governance_id) = deploy(&env, 1_000_000, QUORUM_BPS);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+
+    env.ledger().set_sequence_number(20);
+    let proposal_id = governance.create_proposal(
+        &admin,
+        &String::from_str(&env, "Raise the quorum threshold"),
+        &String::from_str(&env, "Move quorum_bps from 500 to 750."),
+    );
+
+    // Admin gives most of the supply away *after* the snapshot.
+    env.ledger().set_sequence_number(30);
+    let latecomer = Address::generate(&env);
+    QuorumTokenClient::new(&env, &token_id).transfer(&admin, &latecomer, &400_000);
+
+    governance.vote(&admin, &proposal_id, &VOTE_FOR);
+
+    // Weight is the snapshot balance (1_000_000), not the live one (600_000).
+    assert_eq!(governance.get_proposal(&proposal_id).for_votes, 1_000_000);
+}
+
+#[test]
+fn tokens_acquired_after_the_snapshot_carry_no_weight() {
+    let env = Env::default();
+    env.ledger().set_sequence_number(10);
+    let (admin, token_id, governance_id) = deploy(&env, 1_000_000, QUORUM_BPS);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+
+    env.ledger().set_sequence_number(20);
+    let proposal_id = governance.create_proposal(
+        &admin,
+        &String::from_str(&env, "Raise the quorum threshold"),
+        &String::from_str(&env, "Move quorum_bps from 500 to 750."),
+    );
+
+    // Buying in after the proposal opened must not buy influence — this is the
+    // flash-loan path the snapshot exists to close.
+    env.ledger().set_sequence_number(30);
+    let latecomer = Address::generate(&env);
+    QuorumTokenClient::new(&env, &token_id).transfer(&admin, &latecomer, &400_000);
+
+    assert_eq!(
+        governance.try_vote(&latecomer, &proposal_id, &VOTE_FOR),
+        Err(Ok(GovernanceError::NoVotingPower))
+    );
+    assert_eq!(governance.get_proposal(&proposal_id).for_votes, 0);
+    assert!(!governance.has_voted(&proposal_id, &latecomer));
+}
+
+#[test]
+fn address_that_never_held_tokens_cannot_vote() {
+    let env = Env::default();
+    env.ledger().set_sequence_number(10);
+    let (admin, _, governance_id) = deploy(&env, 1_000_000, QUORUM_BPS);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+
+    env.ledger().set_sequence_number(20);
+    let proposal_id = governance.create_proposal(
+        &admin,
+        &String::from_str(&env, "Raise the quorum threshold"),
+        &String::from_str(&env, "Move quorum_bps from 500 to 750."),
+    );
+
+    assert_eq!(
+        governance.try_vote(&Address::generate(&env), &proposal_id, &VOTE_FOR),
+        Err(Ok(GovernanceError::NoVotingPower))
+    );
 }
 
 #[test]

@@ -8,6 +8,8 @@ use soroban_sdk::{contract, contractclient, contractimpl, contracttype, contract
 #[contractclient(name = "TokenClient")]
 pub trait TokenInterface {
     fn total_supply(env: Env) -> i128;
+    fn balance(env: Env, owner: Address) -> i128;
+    fn get_past_balance(env: Env, owner: Address, ledger: u32) -> i128;
 }
 
 #[contracterror]
@@ -27,6 +29,7 @@ pub enum GovernanceError {
     VotingPeriodEnded       = 11,
     TimelockNotExpired      = 12,
     Overflow                = 13,
+    NoVotingPower           = 14,
 }
 
 /// Basis-point denominator: `quorum_bps` of 500 means 5% of total supply.
@@ -126,7 +129,14 @@ impl GovernanceContract {
             .get(&DataKey::Proposal(proposal_id)).ok_or(GovernanceError::ProposalNotFound)?;
         if env.ledger().sequence() > proposal.end_ledger { return Err(GovernanceError::VotingPeriodEnded); }
         if proposal.status != ProposalStatus::Active { return Err(GovernanceError::VotingNotActive); }
-        let voting_power: i128 = 0; // TODO: get from token contract at snapshot_ledger
+
+        // Power is read at the proposal's snapshot ledger, not live, so tokens
+        // bought or borrowed after the proposal opened carry no weight.
+        let config: Config = env.storage().instance().get(&DataKey::Config).unwrap();
+        let voting_power = TokenClient::new(&env, &config.token)
+            .get_past_balance(&voter, &proposal.snapshot_ledger);
+        if voting_power <= 0 { return Err(GovernanceError::NoVotingPower); }
+
         match support {
             0 => proposal.against_votes += voting_power,
             1 => proposal.for_votes += voting_power,
