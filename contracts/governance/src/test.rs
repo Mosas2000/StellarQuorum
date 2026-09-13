@@ -240,6 +240,43 @@ fn address_that_never_held_tokens_cannot_vote() {
 }
 
 #[test]
+fn add_weight_saturates_into_an_error_at_the_i128_boundary() {
+    assert_eq!(
+        GovernanceContract::add_weight(i128::MAX - 1, 1),
+        Ok(i128::MAX)
+    );
+    assert_eq!(
+        GovernanceContract::add_weight(i128::MAX, 1),
+        Err(GovernanceError::Overflow)
+    );
+    assert_eq!(
+        GovernanceContract::add_weight(1, i128::MAX),
+        Err(GovernanceError::Overflow)
+    );
+    assert_eq!(GovernanceContract::add_weight(0, 0), Ok(0));
+}
+
+#[test]
+fn tallying_the_entire_supply_at_the_boundary_does_not_trap() {
+    let env = Env::default();
+    env.ledger().set_sequence_number(10);
+    // quorum_bps must be 0 here: any non-zero bps against a maxed supply
+    // overflows the quorum calculation before a vote is ever cast.
+    let (admin, _, governance_id) = deploy(&env, i128::MAX, 0);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+
+    env.ledger().set_sequence_number(20);
+    let proposal_id = governance.create_proposal(
+        &admin,
+        &String::from_str(&env, "Whole supply votes"),
+        &String::from_str(&env, "Single holder controlling i128::MAX."),
+    );
+    governance.vote(&admin, &proposal_id, &VOTE_FOR);
+
+    assert_eq!(governance.get_proposal(&proposal_id).for_votes, i128::MAX);
+}
+
+#[test]
 fn quorum_for_supply_truncates_fractional_thresholds() {
     // 5% of 199 is 9.95 — truncated down so the threshold never exceeds supply.
     assert_eq!(

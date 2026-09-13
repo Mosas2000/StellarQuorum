@@ -5,6 +5,11 @@ resolver = "2"
 [workspace.dependencies]
 soroban-sdk = { version = "22.0.0", features = ["alloc"] }
 
+[profile.dev]
+# Match the release profile so tests exercise the same trapping behaviour and
+# an unchecked add cannot silently wrap under `cargo test`.
+overflow-checks = true
+
 [profile.release]
 opt-level = "z"
 overflow-checks = true

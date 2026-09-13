@@ -145,11 +145,12 @@ impl GovernanceContract {
             .get_past_balance(&voter, &proposal.snapshot_ledger);
         if voting_power <= 0 { return Err(GovernanceError::NoVotingPower); }
 
-        match support {
-            0 => proposal.against_votes += voting_power,
-            1 => proposal.for_votes += voting_power,
-            _ => proposal.abstain_votes += voting_power,
-        }
+        let tally = match support {
+            0 => &mut proposal.against_votes,
+            1 => &mut proposal.for_votes,
+            _ => &mut proposal.abstain_votes,
+        };
+        *tally = Self::add_weight(*tally, voting_power)?;
         env.storage().persistent().set(&DataKey::Proposal(proposal_id), &proposal);
         env.storage().persistent().set(&DataKey::HasVoted(proposal_id, voter), &support);
         Ok(())
@@ -220,6 +221,17 @@ impl GovernanceContract {
     /// Integer division truncates, so the threshold is never rounded up beyond
     /// what the supply supports. Uses checked arithmetic because a large supply
     /// multiplied by `quorum_bps` can exceed `i128::MAX`.
+    /// Adds `weight` to a running vote tally.
+    ///
+    /// Returns `Overflow` rather than trapping. Token supply bounds the sum of
+    /// all balances to `i128::MAX`, so an honest tally cannot overflow today —
+    /// but nothing in the contract *enforces* that invariant, and a trap in
+    /// `vote()` would be an unrecoverable panic rather than an error a caller
+    /// can handle.
+    fn add_weight(tally: i128, weight: i128) -> Result<i128, GovernanceError> {
+        tally.checked_add(weight).ok_or(GovernanceError::Overflow)
+    }
+
     fn quorum_for_supply(total_supply: i128, quorum_bps: u32) -> Result<i128, GovernanceError> {
         total_supply
             .checked_mul(i128::from(quorum_bps))
