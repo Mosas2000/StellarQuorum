@@ -239,6 +239,74 @@ fn address_that_never_held_tokens_cannot_vote() {
     );
 }
 
+const VOTE_AGAINST: u32 = 0;
+const VOTE_ABSTAIN: u32 = 2;
+
+#[test]
+fn get_vote_returns_the_recorded_choice() {
+    let env = Env::default();
+    env.ledger().set_sequence_number(10);
+    let (admin, token_id, governance_id) = deploy(&env, 900_000, QUORUM_BPS);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+    let token = QuorumTokenClient::new(&env, &token_id);
+
+    // Three holders, funded before the snapshot so each carries weight.
+    let against = Address::generate(&env);
+    let abstain = Address::generate(&env);
+    token.transfer(&admin, &against, &300_000);
+    token.transfer(&admin, &abstain, &300_000);
+
+    env.ledger().set_sequence_number(20);
+    let proposal_id = governance.create_proposal(
+        &admin,
+        &String::from_str(&env, "Three-way split"),
+        &String::from_str(&env, "One voter per choice."),
+    );
+
+    governance.vote(&admin, &proposal_id, &VOTE_FOR);
+    governance.vote(&against, &proposal_id, &VOTE_AGAINST);
+    governance.vote(&abstain, &proposal_id, &VOTE_ABSTAIN);
+
+    assert_eq!(governance.get_vote(&proposal_id, &admin), Some(VOTE_FOR));
+    assert_eq!(governance.get_vote(&proposal_id, &against), Some(VOTE_AGAINST));
+    assert_eq!(governance.get_vote(&proposal_id, &abstain), Some(VOTE_ABSTAIN));
+}
+
+#[test]
+fn get_vote_is_none_for_an_address_that_has_not_voted() {
+    let env = Env::default();
+    env.ledger().set_sequence_number(10);
+    let (admin, _, governance_id) = deploy(&env, 1_000_000, QUORUM_BPS);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+
+    env.ledger().set_sequence_number(20);
+    let proposal_id = governance.create_proposal(
+        &admin,
+        &String::from_str(&env, "Nobody has voted yet"),
+        &String::from_str(&env, "Fresh proposal."),
+    );
+
+    // Never voted, and a non-holder who could not vote even if they tried.
+    assert_eq!(governance.get_vote(&proposal_id, &admin), None);
+    assert_eq!(governance.get_vote(&proposal_id, &Address::generate(&env)), None);
+
+    // A rejected vote must not leave a record behind.
+    let latecomer = Address::generate(&env);
+    assert!(governance.try_vote(&latecomer, &proposal_id, &VOTE_FOR).is_err());
+    assert_eq!(governance.get_vote(&proposal_id, &latecomer), None);
+}
+
+#[test]
+fn get_vote_is_none_for_an_unknown_proposal() {
+    let env = Env::default();
+    let (admin, _, governance_id) = deploy(&env, 1_000_000, QUORUM_BPS);
+
+    assert_eq!(
+        GovernanceContractClient::new(&env, &governance_id).get_vote(&999, &admin),
+        None
+    );
+}
+
 #[test]
 fn add_weight_saturates_into_an_error_at_the_i128_boundary() {
     assert_eq!(

@@ -196,6 +196,15 @@ impl GovernanceContract {
         env.storage().persistent().has(&DataKey::HasVoted(proposal_id, voter))
     }
 
+    /// The choice `voter` recorded on `proposal_id` — 0 Against, 1 For,
+    /// 2 Abstain — or `None` if they have not voted.
+    ///
+    /// `vote()` already stores the support value; this exposes it so clients
+    /// can show *how* a wallet voted rather than only whether it did.
+    pub fn get_vote(env: Env, proposal_id: u64, voter: Address) -> Option<u32> {
+        env.storage().persistent().get(&DataKey::HasVoted(proposal_id, voter))
+    }
+
     pub fn get_config(env: Env) -> Config {
         env.storage().instance().get(&DataKey::Config).unwrap()
     }
