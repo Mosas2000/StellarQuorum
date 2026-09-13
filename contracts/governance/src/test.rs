@@ -10,6 +10,16 @@ const PROPOSAL_THRESHOLD: i128 = 0;
 /// Registers a QUORUM token and a governor wired to it, minting `initial_supply`
 /// to the admin.
 fn deploy(env: &Env, initial_supply: i128, quorum_bps: u32) -> (Address, Address, Address) {
+    deploy_with_threshold(env, initial_supply, quorum_bps, PROPOSAL_THRESHOLD)
+}
+
+/// As `deploy`, with an explicit `proposal_threshold`.
+fn deploy_with_threshold(
+    env: &Env,
+    initial_supply: i128,
+    quorum_bps: u32,
+    proposal_threshold: i128,
+) -> (Address, Address, Address) {
     env.mock_all_auths();
     let admin = Address::generate(env);
 
@@ -29,7 +39,7 @@ fn deploy(env: &Env, initial_supply: i128, quorum_bps: u32) -> (Address, Address
         &quorum_bps,
         &VOTING_PERIOD,
         &TIMELOCK_PERIOD,
-        &PROPOSAL_THRESHOLD,
+        &proposal_threshold,
     );
 
     (admin, token_id, governance_id)
@@ -80,6 +90,78 @@ fn quorum_bps_of_zero_yields_no_threshold() {
     let proposer = Address::generate(&env);
 
     assert_eq!(propose(&env, &governance_id, &proposer).quorum_required, 0);
+}
+
+const THRESHOLD: i128 = 10_000;
+
+#[test]
+fn proposer_below_threshold_is_rejected() {
+    let env = Env::default();
+    let (_, _, governance_id) = deploy_with_threshold(&env, 1_000_000, QUORUM_BPS, THRESHOLD);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+    let broke = Address::generate(&env);
+
+    assert_eq!(
+        governance.try_create_proposal(
+            &broke,
+            &String::from_str(&env, "Fund my thing"),
+            &String::from_str(&env, "I hold no QUORUM."),
+        ),
+        Err(Ok(GovernanceError::BelowProposalThreshold))
+    );
+    assert_eq!(governance.get_proposal_count(), 0);
+}
+
+#[test]
+fn proposer_holding_just_under_threshold_is_rejected() {
+    let env = Env::default();
+    let (admin, token_id, governance_id) =
+        deploy_with_threshold(&env, 1_000_000, QUORUM_BPS, THRESHOLD);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+    let almost = Address::generate(&env);
+    QuorumTokenClient::new(&env, &token_id).transfer(&admin, &almost, &(THRESHOLD - 1));
+
+    assert_eq!(
+        governance.try_create_proposal(
+            &almost,
+            &String::from_str(&env, "One short"),
+            &String::from_str(&env, "Holding threshold - 1."),
+        ),
+        Err(Ok(GovernanceError::BelowProposalThreshold))
+    );
+}
+
+#[test]
+fn proposer_at_threshold_succeeds() {
+    let env = Env::default();
+    let (admin, token_id, governance_id) =
+        deploy_with_threshold(&env, 1_000_000, QUORUM_BPS, THRESHOLD);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+    let holder = Address::generate(&env);
+
+    // Exactly the threshold — the check is inclusive.
+    QuorumTokenClient::new(&env, &token_id).transfer(&admin, &holder, &THRESHOLD);
+
+    let id = governance.create_proposal(
+        &holder,
+        &String::from_str(&env, "Exactly enough"),
+        &String::from_str(&env, "Holding exactly the threshold."),
+    );
+    assert_eq!(governance.get_proposal(&id).proposer, holder);
+}
+
+#[test]
+fn zero_threshold_lets_any_address_propose() {
+    let env = Env::default();
+    let (_, _, governance_id) = deploy_with_threshold(&env, 1_000_000, QUORUM_BPS, 0);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+
+    let id = governance.create_proposal(
+        &Address::generate(&env),
+        &String::from_str(&env, "Open season"),
+        &String::from_str(&env, "No threshold configured."),
+    );
+    assert_eq!(id, 1);
 }
 
 const VOTE_FOR: u32 = 1;

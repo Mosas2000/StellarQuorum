@@ -100,10 +100,18 @@ impl GovernanceContract {
         let id = count + 1;
         let current = env.ledger().sequence();
         let config: Config = env.storage().instance().get(&DataKey::Config).unwrap();
-        let quorum_required = Self::quorum_for_supply(
-            TokenClient::new(&env, &config.token).total_supply(),
-            config.quorum_bps,
-        )?;
+        let token = TokenClient::new(&env, &config.token);
+
+        // Gate proposal creation on a real stake, so spamming the proposal
+        // queue costs tokens. Checked against the live balance: the threshold
+        // is about who may open a proposal now, unlike voting power, which is
+        // fixed at the snapshot.
+        if token.balance(&proposer) < config.proposal_threshold {
+            return Err(GovernanceError::BelowProposalThreshold);
+        }
+
+        let quorum_required =
+            Self::quorum_for_supply(token.total_supply(), config.quorum_bps)?;
         let proposal = Proposal {
             id, proposer, title, description,
             for_votes: 0, against_votes: 0, abstain_votes: 0,
