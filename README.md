@@ -74,6 +74,7 @@ await client.getAllProposals();          // Get all proposals
 await client.getProposalCount();        // Total proposal count
 await client.getConfig();               // Protocol config (quorum, voting period, etc.)
 await client.hasVoted(1n, 'G...');      // Check if address voted
+await client.getVote(1n, 'G...');       // How they voted: 0=Against, 1=For, 2=Abstain, null=not voted
 
 // Build transactions (returns unsigned XDR for Freighter signing)
 await client.buildCreateProposal(address, title, description);

@@ -1,5 +1,14 @@
-import { SorobanRpc, Contract, TransactionBuilder, BASE_FEE, nativeToScVal, scValToNative, Address } from '@stellar/stellar-sdk';
+import { SorobanRpc, Contract, TransactionBuilder, BASE_FEE, nativeToScVal, scValToNative, Address, Account, xdr } from '@stellar/stellar-sdk';
 import type { Proposal, GovernanceConfig, QuorumClientConfig, VoteSupport } from './types';
+
+/**
+ * Source account used for read-only simulation.
+ *
+ * Simulating a contract call still requires a source account to build the
+ * transaction, but a simulation is never signed or submitted, so the all-zero
+ * ed25519 account works and means reads need no funded account.
+ */
+const READ_ONLY_SOURCE = 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF';
 
 export class QuorumClient {
   private server: SorobanRpc.Server;
@@ -30,8 +39,27 @@ export class QuorumClient {
   }
 
   async hasVoted(proposalId: bigint, voter: string): Promise<boolean> {
-    // TODO: implement via simulateTransaction → governance.has_voted(proposalId, voter)
-    throw new Error('Not implemented');
+    // has_voted and get_vote read the same storage entry, so one round trip
+    // answers both questions.
+    return (await this.getVote(proposalId, voter)) !== null;
+  }
+
+  /**
+   * The choice a voter recorded on a proposal, or `null` if they have not
+   * voted.
+   *
+   * @param proposalId Proposal to look up.
+   * @param voter Stellar address of the voter.
+   * @returns `0` Against, `1` For, `2` Abstain, or `null`.
+   */
+  async getVote(proposalId: bigint, voter: string): Promise<VoteSupport | null> {
+    const support = await this.simulate<number | null | undefined>(
+      'get_vote',
+      nativeToScVal(proposalId, { type: 'u64' }),
+      new Address(voter).toScVal(),
+    );
+    // The contract returns Option<u32>; None decodes to null/undefined.
+    return support === null || support === undefined ? null : (support as VoteSupport);
   }
 
   async getProposalsByStatus(status: Proposal['status']): Promise<Proposal[]> {
@@ -45,6 +73,37 @@ export class QuorumClient {
       Array.from({ length: Number(count) }, (_, i) => this.getProposal(BigInt(i + 1)))
     );
     return proposals.filter(Boolean) as Proposal[];
+  }
+
+  // ─── Internals ───────────────────────────────────────────────────────────
+
+  /**
+   * Calls a read-only contract method through `simulateTransaction` and decodes
+   * the return value.
+   *
+   * Nothing is signed or submitted, so this costs no fee and needs no funded
+   * account.
+   */
+  private async simulate<T>(method: string, ...args: xdr.ScVal[]): Promise<T> {
+    const source = new Account(READ_ONLY_SOURCE, '0');
+    const tx = new TransactionBuilder(source, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(this.governance.call(method, ...args))
+      .setTimeout(30)
+      .build();
+
+    const simulation = await this.server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(simulation)) {
+      throw new Error(`Simulation of ${method} failed: ${simulation.error}`);
+    }
+    if (!simulation.result) {
+      throw new Error(`Simulation of ${method} returned no result`);
+    }
+
+    return scValToNative(simulation.result.retval) as T;
   }
 
   // ─── Transaction Builders ────────────────────────────────────────────────
