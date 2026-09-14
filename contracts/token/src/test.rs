@@ -18,6 +18,260 @@ fn deploy(env: &Env) -> (Address, QuorumTokenClient<'_>) {
     (admin, token)
 }
 
+// ─── Initialization & metadata ───────────────────────────────────────────────
+
+#[test]
+fn initialize_sets_metadata_supply_and_admin_balance() {
+    let env = Env::default();
+    let (admin, token) = deploy(&env);
+
+    assert_eq!(token.name(), String::from_str(&env, "Quorum"));
+    assert_eq!(token.symbol(), String::from_str(&env, "QUORUM"));
+    assert_eq!(token.decimals(), 7);
+    assert_eq!(token.total_supply(), INITIAL_SUPPLY);
+    assert_eq!(token.balance(&admin), INITIAL_SUPPLY);
+}
+
+#[test]
+fn initialize_cannot_run_twice() {
+    let env = Env::default();
+    let (admin, token) = deploy(&env);
+
+    assert_eq!(
+        token.try_initialize(
+            &admin,
+            &String::from_str(&env, "Impostor"),
+            &String::from_str(&env, "FAKE"),
+            &2,
+            &999,
+        ),
+        Err(Ok(TokenError::AlreadyInitialized))
+    );
+    // Original metadata survives the rejected call.
+    assert_eq!(token.symbol(), String::from_str(&env, "QUORUM"));
+    assert_eq!(token.total_supply(), INITIAL_SUPPLY);
+}
+
+#[test]
+fn balance_of_an_unknown_address_is_zero() {
+    let env = Env::default();
+    let (_, token) = deploy(&env);
+
+    assert_eq!(token.balance(&Address::generate(&env)), 0);
+}
+
+// ─── Transfer ────────────────────────────────────────────────────────────────
+
+#[test]
+fn transfer_moves_balance_between_accounts() {
+    let env = Env::default();
+    let (admin, token) = deploy(&env);
+    let recipient = Address::generate(&env);
+
+    token.transfer(&admin, &recipient, &250_000);
+
+    assert_eq!(token.balance(&admin), INITIAL_SUPPLY - 250_000);
+    assert_eq!(token.balance(&recipient), 250_000);
+    // Moving tokens must not change how many exist.
+    assert_eq!(token.total_supply(), INITIAL_SUPPLY);
+}
+
+#[test]
+fn transfer_of_the_entire_balance_is_allowed() {
+    let env = Env::default();
+    let (admin, token) = deploy(&env);
+    let recipient = Address::generate(&env);
+
+    token.transfer(&admin, &recipient, &INITIAL_SUPPLY);
+
+    assert_eq!(token.balance(&admin), 0);
+    assert_eq!(token.balance(&recipient), INITIAL_SUPPLY);
+}
+
+#[test]
+fn transfer_beyond_balance_is_rejected() {
+    let env = Env::default();
+    let (admin, token) = deploy(&env);
+    let recipient = Address::generate(&env);
+
+    assert_eq!(
+        token.try_transfer(&admin, &recipient, &(INITIAL_SUPPLY + 1)),
+        Err(Ok(TokenError::InsufficientBalance))
+    );
+    assert_eq!(token.balance(&admin), INITIAL_SUPPLY);
+    assert_eq!(token.balance(&recipient), 0);
+}
+
+#[test]
+fn transfer_of_a_non_positive_amount_is_rejected() {
+    let env = Env::default();
+    let (admin, token) = deploy(&env);
+    let recipient = Address::generate(&env);
+
+    assert_eq!(
+        token.try_transfer(&admin, &recipient, &0),
+        Err(Ok(TokenError::InvalidAmount))
+    );
+    assert_eq!(
+        token.try_transfer(&admin, &recipient, &-100),
+        Err(Ok(TokenError::InvalidAmount))
+    );
+}
+
+// ─── Mint & burn ─────────────────────────────────────────────────────────────
+
+#[test]
+fn mint_raises_the_recipient_balance_and_total_supply() {
+    let env = Env::default();
+    let (_, token) = deploy(&env);
+    let recipient = Address::generate(&env);
+
+    token.mint(&recipient, &300_000);
+
+    assert_eq!(token.balance(&recipient), 300_000);
+    assert_eq!(token.total_supply(), INITIAL_SUPPLY + 300_000);
+}
+
+#[test]
+fn mint_of_a_non_positive_amount_is_rejected() {
+    let env = Env::default();
+    let (admin, token) = deploy(&env);
+
+    assert_eq!(token.try_mint(&admin, &0), Err(Ok(TokenError::InvalidAmount)));
+    assert_eq!(
+        token.try_mint(&admin, &-1),
+        Err(Ok(TokenError::InvalidAmount))
+    );
+    assert_eq!(token.total_supply(), INITIAL_SUPPLY);
+}
+
+#[test]
+fn burn_lowers_the_holder_balance_and_total_supply() {
+    let env = Env::default();
+    let (admin, token) = deploy(&env);
+
+    token.burn(&admin, &400_000);
+
+    assert_eq!(token.balance(&admin), INITIAL_SUPPLY - 400_000);
+    assert_eq!(token.total_supply(), INITIAL_SUPPLY - 400_000);
+}
+
+#[test]
+fn burn_beyond_balance_is_rejected() {
+    let env = Env::default();
+    let (admin, token) = deploy(&env);
+    let holder = Address::generate(&env);
+    token.transfer(&admin, &holder, &1_000);
+
+    assert_eq!(
+        token.try_burn(&holder, &1_001),
+        Err(Ok(TokenError::InsufficientBalance))
+    );
+    assert_eq!(token.balance(&holder), 1_000);
+    assert_eq!(token.total_supply(), INITIAL_SUPPLY);
+}
+
+// ─── Authorization ───────────────────────────────────────────────────────────
+//
+// `deploy` calls mock_all_auths(), which makes every require_auth() succeed.
+// These tests clear the mock with set_auths(&[]) so the guards actually run.
+
+#[test]
+fn transfer_without_authorization_is_rejected() {
+    let env = Env::default();
+    let (admin, token) = deploy(&env);
+    let recipient = Address::generate(&env);
+
+    env.set_auths(&[]);
+
+    assert!(token.try_transfer(&admin, &recipient, &1_000).is_err());
+    assert_eq!(token.balance(&admin), INITIAL_SUPPLY);
+    assert_eq!(token.balance(&recipient), 0);
+}
+
+#[test]
+fn mint_without_admin_authorization_is_rejected() {
+    let env = Env::default();
+    let (_, token) = deploy(&env);
+    let attacker = Address::generate(&env);
+
+    env.set_auths(&[]);
+
+    // mint() takes no caller argument — it is gated purely by require_auth()
+    // on the stored admin, so an unauthorized call cannot satisfy it.
+    assert!(token.try_mint(&attacker, &1_000_000).is_err());
+    assert_eq!(token.balance(&attacker), 0);
+    assert_eq!(token.total_supply(), INITIAL_SUPPLY);
+}
+
+#[test]
+fn burn_without_authorization_is_rejected() {
+    let env = Env::default();
+    let (admin, token) = deploy(&env);
+
+    env.set_auths(&[]);
+
+    assert!(token.try_burn(&admin, &1_000).is_err());
+    assert_eq!(token.total_supply(), INITIAL_SUPPLY);
+}
+
+#[test]
+fn transfer_admin_without_authorization_is_rejected() {
+    let env = Env::default();
+    let (_, token) = deploy(&env);
+    let attacker = Address::generate(&env);
+
+    env.set_auths(&[]);
+
+    assert!(token.try_transfer_admin(&attacker).is_err());
+}
+
+// ─── Allowance ───────────────────────────────────────────────────────────────
+
+#[test]
+fn approve_records_an_allowance_per_owner_spender_pair() {
+    let env = Env::default();
+    let (admin, token) = deploy(&env);
+    let spender = Address::generate(&env);
+    let other_spender = Address::generate(&env);
+
+    token.approve(&admin, &spender, &50_000);
+
+    assert_eq!(token.allowance(&admin, &spender), 50_000);
+    // Allowances are per pair, not per owner.
+    assert_eq!(token.allowance(&admin, &other_spender), 0);
+    assert_eq!(token.allowance(&spender, &admin), 0);
+}
+
+#[test]
+fn approve_overwrites_a_previous_allowance() {
+    let env = Env::default();
+    let (admin, token) = deploy(&env);
+    let spender = Address::generate(&env);
+
+    token.approve(&admin, &spender, &50_000);
+    token.approve(&admin, &spender, &10_000);
+
+    assert_eq!(token.allowance(&admin, &spender), 10_000);
+}
+
+// ─── Admin ───────────────────────────────────────────────────────────────────
+
+#[test]
+fn transfer_admin_hands_minting_rights_to_the_new_admin() {
+    let env = Env::default();
+    let (_, token) = deploy(&env);
+    let new_admin = Address::generate(&env);
+
+    token.transfer_admin(&new_admin);
+
+    // The rights moved: the new admin can mint.
+    token.mint(&new_admin, &1_000);
+    assert_eq!(token.balance(&new_admin), 1_000);
+}
+
+// ─── Checkpoints ─────────────────────────────────────────────────────────────
+
 #[test]
 fn initial_supply_is_checkpointed_to_the_admin() {
     let env = Env::default();
