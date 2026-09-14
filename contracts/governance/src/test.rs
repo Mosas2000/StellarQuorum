@@ -509,6 +509,247 @@ fn get_vote_is_none_for_an_unknown_proposal() {
     );
 }
 
+// ─── Finalize ────────────────────────────────────────────────────────────────
+
+/// Moves past `end_ledger` so the proposal can be finalized.
+fn close_voting(env: &Env, governance: &GovernanceContractClient, proposal_id: u64) {
+    let end_ledger = governance.get_proposal(&proposal_id).end_ledger;
+    env.ledger().set_sequence_number(end_ledger + 1);
+}
+
+#[test]
+fn finalize_queues_a_proposal_that_clears_quorum_and_majority() {
+    let env = Env::default();
+    let (admin, governance_id, proposal_id) = open_with_holders(&env, 1_000_000, QUORUM_BPS, &[]);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+
+    governance.vote(&admin, &proposal_id, &VOTE_FOR);
+    close_voting(&env, &governance, proposal_id);
+    let closed_at = env.ledger().sequence();
+
+    assert_eq!(governance.finalize(&proposal_id), ProposalStatus::Queued);
+
+    let proposal = governance.get_proposal(&proposal_id);
+    assert_eq!(proposal.status, ProposalStatus::Queued);
+    assert_eq!(proposal.queue_ledger, closed_at + TIMELOCK_PERIOD);
+}
+
+#[test]
+fn finalize_fails_a_proposal_that_misses_quorum() {
+    let env = Env::default();
+    let small_holder = Address::generate(&env);
+    // 50% quorum against a 1_000_000 supply needs 500_000; this voter has 1_000.
+    let (_, governance_id, proposal_id) = open_with_holders(
+        &env,
+        1_000_000,
+        5_000,
+        &[(small_holder.clone(), 1_000)],
+    );
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+
+    governance.vote(&small_holder, &proposal_id, &VOTE_FOR);
+    close_voting(&env, &governance, proposal_id);
+
+    assert_eq!(governance.finalize(&proposal_id), ProposalStatus::Failed);
+    assert_eq!(governance.get_proposal(&proposal_id).queue_ledger, 0);
+}
+
+#[test]
+fn finalize_fails_a_proposal_that_clears_quorum_but_loses_the_vote() {
+    let env = Env::default();
+    let opposition = Address::generate(&env);
+    let (admin, governance_id, proposal_id) = open_with_holders(
+        &env,
+        1_000_000,
+        QUORUM_BPS,
+        &[(opposition.clone(), 600_000)],
+    );
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+
+    governance.vote(&admin, &proposal_id, &VOTE_FOR); // 400_000
+    governance.vote(&opposition, &proposal_id, &VOTE_AGAINST); // 600_000
+    close_voting(&env, &governance, proposal_id);
+
+    // Turnout clears quorum, but Against wins.
+    assert_eq!(governance.finalize(&proposal_id), ProposalStatus::Failed);
+}
+
+#[test]
+fn a_tie_fails_because_majority_requires_strictly_more_for_votes() {
+    let env = Env::default();
+    let opposition = Address::generate(&env);
+    let (admin, governance_id, proposal_id) = open_with_holders(
+        &env,
+        1_000_000,
+        QUORUM_BPS,
+        &[(opposition.clone(), 500_000)],
+    );
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+
+    governance.vote(&admin, &proposal_id, &VOTE_FOR); // 500_000
+    governance.vote(&opposition, &proposal_id, &VOTE_AGAINST); // 500_000
+    close_voting(&env, &governance, proposal_id);
+
+    assert_eq!(governance.finalize(&proposal_id), ProposalStatus::Failed);
+}
+
+#[test]
+fn finalize_before_the_deadline_is_rejected() {
+    let env = Env::default();
+    let (admin, governance_id, proposal_id) = open_with_holders(&env, 1_000_000, QUORUM_BPS, &[]);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+    governance.vote(&admin, &proposal_id, &VOTE_FOR);
+
+    // On end_ledger itself voting is still open, so finalize is premature.
+    env.ledger()
+        .set_sequence_number(governance.get_proposal(&proposal_id).end_ledger);
+    assert_eq!(
+        governance.try_finalize(&proposal_id),
+        Err(Ok(GovernanceError::VotingNotActive))
+    );
+}
+
+// ─── Execute ─────────────────────────────────────────────────────────────────
+
+/// Votes the proposal through and finalizes it into Queued.
+fn queue_proposal(env: &Env, governance: &GovernanceContractClient, admin: &Address, id: u64) {
+    governance.vote(admin, &id, &VOTE_FOR);
+    close_voting(env, governance, id);
+    assert_eq!(governance.finalize(&id), ProposalStatus::Queued);
+}
+
+#[test]
+fn execute_succeeds_once_the_timelock_has_elapsed() {
+    let env = Env::default();
+    let (admin, governance_id, proposal_id) = open_with_holders(&env, 1_000_000, QUORUM_BPS, &[]);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+    queue_proposal(&env, &governance, &admin, proposal_id);
+
+    let queue_ledger = governance.get_proposal(&proposal_id).queue_ledger;
+    env.ledger().set_sequence_number(queue_ledger);
+    governance.execute(&proposal_id);
+
+    assert_eq!(
+        governance.get_proposal(&proposal_id).status,
+        ProposalStatus::Executed
+    );
+}
+
+#[test]
+fn execute_during_the_timelock_is_rejected() {
+    let env = Env::default();
+    let (admin, governance_id, proposal_id) = open_with_holders(&env, 1_000_000, QUORUM_BPS, &[]);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+    queue_proposal(&env, &governance, &admin, proposal_id);
+
+    let queue_ledger = governance.get_proposal(&proposal_id).queue_ledger;
+    env.ledger().set_sequence_number(queue_ledger - 1);
+
+    assert_eq!(
+        governance.try_execute(&proposal_id),
+        Err(Ok(GovernanceError::TimelockNotExpired))
+    );
+    assert_eq!(
+        governance.get_proposal(&proposal_id).status,
+        ProposalStatus::Queued
+    );
+}
+
+#[test]
+fn execute_is_rejected_while_a_proposal_is_still_active() {
+    let env = Env::default();
+    let (admin, governance_id, proposal_id) = open_with_holders(&env, 1_000_000, QUORUM_BPS, &[]);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+    governance.vote(&admin, &proposal_id, &VOTE_FOR);
+
+    assert_eq!(
+        governance.try_execute(&proposal_id),
+        Err(Ok(GovernanceError::ProposalNotPassed))
+    );
+}
+
+#[test]
+fn a_failed_proposal_cannot_be_executed() {
+    let env = Env::default();
+    let small_holder = Address::generate(&env);
+    let (_, governance_id, proposal_id) =
+        open_with_holders(&env, 1_000_000, 5_000, &[(small_holder.clone(), 1_000)]);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+
+    governance.vote(&small_holder, &proposal_id, &VOTE_FOR);
+    close_voting(&env, &governance, proposal_id);
+    assert_eq!(governance.finalize(&proposal_id), ProposalStatus::Failed);
+
+    env.ledger().set_sequence_number(env.ledger().sequence() + TIMELOCK_PERIOD + 1);
+    assert_eq!(
+        governance.try_execute(&proposal_id),
+        Err(Ok(GovernanceError::ProposalNotPassed))
+    );
+}
+
+// ─── Cancel ──────────────────────────────────────────────────────────────────
+
+#[test]
+fn a_proposer_can_cancel_their_own_proposal() {
+    let env = Env::default();
+    let (admin, governance_id, proposal_id) = open_with_holders(&env, 1_000_000, QUORUM_BPS, &[]);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+
+    // admin is the proposer here (open_with_holders proposes as admin).
+    governance.cancel(&admin, &proposal_id);
+    assert_eq!(
+        governance.get_proposal(&proposal_id).status,
+        ProposalStatus::Cancelled
+    );
+}
+
+#[test]
+fn the_admin_can_cancel_a_proposal_they_did_not_open() {
+    let env = Env::default();
+    env.ledger().set_sequence_number(GENESIS);
+    let (admin, _, governance_id) = deploy(&env, 1_000_000, QUORUM_BPS);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+
+    env.ledger().set_sequence_number(OPENED);
+    let outsider = Address::generate(&env);
+    let proposal_id = propose(&env, &governance_id, &outsider).id;
+
+    governance.cancel(&admin, &proposal_id);
+    assert_eq!(
+        governance.get_proposal(&proposal_id).status,
+        ProposalStatus::Cancelled
+    );
+}
+
+#[test]
+fn a_third_party_cannot_cancel() {
+    let env = Env::default();
+    let (_, governance_id, proposal_id) = open_with_holders(&env, 1_000_000, QUORUM_BPS, &[]);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+
+    assert_eq!(
+        governance.try_cancel(&Address::generate(&env), &proposal_id),
+        Err(Ok(GovernanceError::Unauthorized))
+    );
+    assert_eq!(
+        governance.get_proposal(&proposal_id).status,
+        ProposalStatus::Active
+    );
+}
+
+#[test]
+fn a_cancelled_proposal_stops_accepting_votes() {
+    let env = Env::default();
+    let (admin, governance_id, proposal_id) = open_with_holders(&env, 1_000_000, QUORUM_BPS, &[]);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+
+    governance.cancel(&admin, &proposal_id);
+    assert_eq!(
+        governance.try_vote(&admin, &proposal_id, &VOTE_FOR),
+        Err(Ok(GovernanceError::VotingNotActive))
+    );
+}
+
 #[test]
 fn add_weight_saturates_into_an_error_at_the_i128_boundary() {
     assert_eq!(
