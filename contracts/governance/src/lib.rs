@@ -36,13 +36,13 @@ pub enum GovernanceError {
 const BPS_DENOMINATOR: i128 = 10_000;
 
 #[contracttype]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProposalStatus {
     Pending, Active, Passed, Failed, Queued, Executed, Cancelled,
 }
 
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Proposal {
     pub id: u64,
     pub proposer: Address,

@@ -242,6 +242,208 @@ fn address_that_never_held_tokens_cannot_vote() {
 const VOTE_AGAINST: u32 = 0;
 const VOTE_ABSTAIN: u32 = 2;
 
+/// Ledger the token is deployed and holders are funded at.
+const GENESIS: u32 = 10;
+/// Ledger proposals are opened at, so `snapshot_ledger` is GENESIS < L < voting.
+const OPENED: u32 = 20;
+
+// ─── Initialization ──────────────────────────────────────────────────────────
+
+#[test]
+fn initialize_stores_the_supplied_config() {
+    let env = Env::default();
+    let (admin, token_id, governance_id) =
+        deploy_with_threshold(&env, 1_000_000, QUORUM_BPS, THRESHOLD);
+
+    let config = GovernanceContractClient::new(&env, &governance_id).get_config();
+    assert_eq!(config.admin, admin);
+    assert_eq!(config.token, token_id);
+    assert_eq!(config.quorum_bps, QUORUM_BPS);
+    assert_eq!(config.voting_period, VOTING_PERIOD);
+    assert_eq!(config.timelock_period, TIMELOCK_PERIOD);
+    assert_eq!(config.proposal_threshold, THRESHOLD);
+    assert_eq!(
+        GovernanceContractClient::new(&env, &governance_id).get_proposal_count(),
+        0
+    );
+}
+
+#[test]
+fn initialize_cannot_run_twice() {
+    let env = Env::default();
+    let (admin, token_id, governance_id) = deploy(&env, 1_000_000, QUORUM_BPS);
+
+    assert_eq!(
+        GovernanceContractClient::new(&env, &governance_id).try_initialize(
+            &admin,
+            &token_id,
+            &QUORUM_BPS,
+            &VOTING_PERIOD,
+            &TIMELOCK_PERIOD,
+            &PROPOSAL_THRESHOLD,
+        ),
+        Err(Ok(GovernanceError::AlreadyInitialized))
+    );
+}
+
+// ─── Proposal creation ───────────────────────────────────────────────────────
+
+#[test]
+fn create_proposal_sets_the_expected_ledger_window() {
+    let env = Env::default();
+    env.ledger().set_sequence_number(GENESIS);
+    let (admin, _, governance_id) = deploy(&env, 1_000_000, QUORUM_BPS);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+
+    env.ledger().set_sequence_number(OPENED);
+    let proposal = propose(&env, &governance_id, &admin);
+
+    assert_eq!(proposal.id, 1);
+    assert_eq!(proposal.proposer, admin);
+    assert_eq!(proposal.snapshot_ledger, OPENED);
+    assert_eq!(proposal.start_ledger, OPENED + 1);
+    assert_eq!(proposal.end_ledger, OPENED + 1 + VOTING_PERIOD);
+    assert_eq!(proposal.queue_ledger, 0);
+    assert_eq!(proposal.status, ProposalStatus::Active);
+    assert_eq!(
+        (proposal.for_votes, proposal.against_votes, proposal.abstain_votes),
+        (0, 0, 0)
+    );
+    assert_eq!(governance.get_proposal_count(), 1);
+}
+
+#[test]
+fn proposal_ids_increment_from_one() {
+    let env = Env::default();
+    env.ledger().set_sequence_number(GENESIS);
+    let (admin, _, governance_id) = deploy(&env, 1_000_000, QUORUM_BPS);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+
+    env.ledger().set_sequence_number(OPENED);
+    for expected in 1..=3u64 {
+        assert_eq!(propose(&env, &governance_id, &admin).id, expected);
+    }
+    assert_eq!(governance.get_proposal_count(), 3);
+}
+
+#[test]
+fn get_proposal_rejects_an_unknown_id() {
+    let env = Env::default();
+    let (_, _, governance_id) = deploy(&env, 1_000_000, QUORUM_BPS);
+
+    assert_eq!(
+        GovernanceContractClient::new(&env, &governance_id).try_get_proposal(&999),
+        Err(Ok(GovernanceError::ProposalNotFound))
+    );
+}
+
+// ─── Voting ──────────────────────────────────────────────────────────────────
+
+/// Deploys with `supply`, funds each holder before the snapshot, and opens a
+/// proposal at `OPENED`. Returns (admin, governance id, proposal id).
+fn open_with_holders(
+    env: &Env,
+    supply: i128,
+    quorum_bps: u32,
+    holders: &[(Address, i128)],
+) -> (Address, Address, u64) {
+    env.ledger().set_sequence_number(GENESIS);
+    let (admin, token_id, governance_id) = deploy(env, supply, quorum_bps);
+    let token = QuorumTokenClient::new(env, &token_id);
+
+    // Funded at GENESIS, before the snapshot, so the grants carry weight.
+    for (holder, amount) in holders {
+        token.transfer(&admin, holder, amount);
+    }
+
+    env.ledger().set_sequence_number(OPENED);
+    let id = propose(env, &governance_id, &admin).id;
+    (admin, governance_id, id)
+}
+
+#[test]
+fn votes_accumulate_into_the_matching_tally() {
+    let env = Env::default();
+    let (against_voter, abstain_voter) = (Address::generate(&env), Address::generate(&env));
+    let (admin, governance_id, proposal_id) = open_with_holders(
+        &env,
+        1_000_000,
+        QUORUM_BPS,
+        &[(against_voter.clone(), 200_000), (abstain_voter.clone(), 300_000)],
+    );
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+
+    governance.vote(&admin, &proposal_id, &VOTE_FOR); // 500_000 left after grants
+    governance.vote(&against_voter, &proposal_id, &VOTE_AGAINST);
+    governance.vote(&abstain_voter, &proposal_id, &VOTE_ABSTAIN);
+
+    let proposal = governance.get_proposal(&proposal_id);
+    assert_eq!(proposal.for_votes, 500_000);
+    assert_eq!(proposal.against_votes, 200_000);
+    assert_eq!(proposal.abstain_votes, 300_000);
+}
+
+#[test]
+fn a_voter_cannot_vote_twice() {
+    let env = Env::default();
+    let (admin, governance_id, proposal_id) = open_with_holders(&env, 1_000_000, QUORUM_BPS, &[]);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+
+    governance.vote(&admin, &proposal_id, &VOTE_FOR);
+    assert_eq!(
+        governance.try_vote(&admin, &proposal_id, &VOTE_AGAINST),
+        Err(Ok(GovernanceError::AlreadyVoted))
+    );
+
+    // The rejected second vote left the tallies untouched.
+    let proposal = governance.get_proposal(&proposal_id);
+    assert_eq!(proposal.for_votes, 1_000_000);
+    assert_eq!(proposal.against_votes, 0);
+}
+
+#[test]
+fn votes_after_the_deadline_are_rejected() {
+    let env = Env::default();
+    let (admin, governance_id, proposal_id) = open_with_holders(&env, 1_000_000, QUORUM_BPS, &[]);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+    let end_ledger = governance.get_proposal(&proposal_id).end_ledger;
+
+    // The final ledger of the window still accepts votes.
+    env.ledger().set_sequence_number(end_ledger);
+    governance.vote(&admin, &proposal_id, &VOTE_FOR);
+
+    env.ledger().set_sequence_number(end_ledger + 1);
+    let latecomer = Address::generate(&env);
+    assert_eq!(
+        governance.try_vote(&latecomer, &proposal_id, &VOTE_FOR),
+        Err(Ok(GovernanceError::VotingPeriodEnded))
+    );
+}
+
+#[test]
+fn an_out_of_range_vote_choice_is_rejected() {
+    let env = Env::default();
+    let (admin, governance_id, proposal_id) = open_with_holders(&env, 1_000_000, QUORUM_BPS, &[]);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+
+    assert_eq!(
+        governance.try_vote(&admin, &proposal_id, &3),
+        Err(Ok(GovernanceError::InvalidVoteChoice))
+    );
+    assert!(!governance.has_voted(&proposal_id, &admin));
+}
+
+#[test]
+fn voting_on_an_unknown_proposal_is_rejected() {
+    let env = Env::default();
+    let (admin, governance_id, _) = open_with_holders(&env, 1_000_000, QUORUM_BPS, &[]);
+
+    assert_eq!(
+        GovernanceContractClient::new(&env, &governance_id).try_vote(&admin, &999, &VOTE_FOR),
+        Err(Ok(GovernanceError::ProposalNotFound))
+    );
+}
+
 #[test]
 fn get_vote_returns_the_recorded_choice() {
     let env = Env::default();
