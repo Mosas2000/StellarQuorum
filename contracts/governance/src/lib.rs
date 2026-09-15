@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contract, contractclient, contractimpl, contracttype, contracterror, Address, Env, String};
+use soroban_sdk::{contract, contractclient, contractimpl, contracttype, contracterror, Address, Env, String, Symbol};
 
 /// Subset of the QUORUM token interface the governor depends on.
 ///
@@ -34,6 +34,62 @@ pub enum GovernanceError {
 
 /// Basis-point denominator: `quorum_bps` of 500 means 5% of total supply.
 const BPS_DENOMINATOR: i128 = 10_000;
+
+/// Emitted when a proposal is opened.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProposalCreated {
+    pub id: u64,
+    pub proposer: Address,
+    pub title: String,
+    pub start_ledger: u32,
+    pub end_ledger: u32,
+    pub quorum_required: i128,
+}
+
+/// Emitted for each accepted vote. `voting_power` is the weight actually
+/// counted — the voter's balance at the snapshot ledger, not their live one.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VoteCast {
+    pub proposal_id: u64,
+    pub voter: Address,
+    pub support: u32,
+    pub voting_power: i128,
+}
+
+/// Emitted when voting closes and the outcome is decided.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProposalFinalized {
+    pub id: u64,
+    pub status: ProposalStatus,
+    pub for_votes: i128,
+    pub against_votes: i128,
+    pub abstain_votes: i128,
+}
+
+/// Emitted alongside `ProposalFinalized` when a proposal passes and enters the
+/// timelock.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProposalQueued {
+    pub id: u64,
+    pub queue_ledger: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProposalExecuted {
+    pub id: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProposalCancelled {
+    pub id: u64,
+    pub caller: Address,
+}
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -124,6 +180,18 @@ impl GovernanceContract {
         };
         env.storage().persistent().set(&DataKey::Proposal(id), &proposal);
         env.storage().instance().set(&DataKey::ProposalCount, &id);
+
+        env.events().publish(
+            (Symbol::new(&env, "proposal_created"), id),
+            ProposalCreated {
+                id,
+                proposer: proposal.proposer,
+                title: proposal.title,
+                start_ledger: proposal.start_ledger,
+                end_ledger: proposal.end_ledger,
+                quorum_required: proposal.quorum_required,
+            },
+        );
         Ok(id)
     }
 
@@ -152,7 +220,12 @@ impl GovernanceContract {
         };
         *tally = Self::add_weight(*tally, voting_power)?;
         env.storage().persistent().set(&DataKey::Proposal(proposal_id), &proposal);
-        env.storage().persistent().set(&DataKey::HasVoted(proposal_id, voter), &support);
+        env.storage().persistent().set(&DataKey::HasVoted(proposal_id, voter.clone()), &support);
+
+        env.events().publish(
+            (Symbol::new(&env, "vote_cast"), proposal_id, voter.clone()),
+            VoteCast { proposal_id, voter, support, voting_power },
+        );
         Ok(())
     }
 
@@ -170,6 +243,25 @@ impl GovernanceContract {
         } else { ProposalStatus::Failed };
         let status = proposal.status.clone();
         env.storage().persistent().set(&DataKey::Proposal(proposal_id), &proposal);
+
+        env.events().publish(
+            (Symbol::new(&env, "proposal_finalized"), proposal_id),
+            ProposalFinalized {
+                id: proposal_id,
+                status: status.clone(),
+                for_votes: proposal.for_votes,
+                against_votes: proposal.against_votes,
+                abstain_votes: proposal.abstain_votes,
+            },
+        );
+        // A second event on the passing path, so indexers can watch the
+        // timelock without re-reading the proposal to learn queue_ledger.
+        if status == ProposalStatus::Queued {
+            env.events().publish(
+                (Symbol::new(&env, "proposal_queued"), proposal_id),
+                ProposalQueued { id: proposal_id, queue_ledger: proposal.queue_ledger },
+            );
+        }
         Ok(status)
     }
 
@@ -181,6 +273,11 @@ impl GovernanceContract {
         proposal.status = ProposalStatus::Executed;
         env.storage().persistent().set(&DataKey::Proposal(proposal_id), &proposal);
         // TODO: dispatch on-chain actions encoded in proposal
+
+        env.events().publish(
+            (Symbol::new(&env, "proposal_executed"), proposal_id),
+            ProposalExecuted { id: proposal_id },
+        );
         Ok(())
     }
 
@@ -219,6 +316,11 @@ impl GovernanceContract {
         }
         proposal.status = ProposalStatus::Cancelled;
         env.storage().persistent().set(&DataKey::Proposal(proposal_id), &proposal);
+
+        env.events().publish(
+            (Symbol::new(&env, "proposal_cancelled"), proposal_id),
+            ProposalCancelled { id: proposal_id, caller },
+        );
         Ok(())
     }
 }

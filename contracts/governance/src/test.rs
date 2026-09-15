@@ -1,6 +1,7 @@
 use super::*;
 use quorum_token::{QuorumToken, QuorumTokenClient};
-use soroban_sdk::testutils::{Address as _, Ledger as _};
+use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
+use soroban_sdk::{IntoVal, TryFromVal, Val};
 
 const QUORUM_BPS: u32 = 500; // 5%
 const VOTING_PERIOD: u32 = 100;
@@ -747,6 +748,211 @@ fn a_cancelled_proposal_stops_accepting_votes() {
     assert_eq!(
         governance.try_vote(&admin, &proposal_id, &VOTE_FOR),
         Err(Ok(GovernanceError::VotingNotActive))
+    );
+}
+
+// ─── Events ──────────────────────────────────────────────────────────────────
+//
+// env.events().all() collects events from every contract in the test, and the
+// governor cross-invokes the token on most paths, so these filter by the
+// emitting contract rather than indexing blindly into the list.
+
+type EventLog = soroban_sdk::Vec<(soroban_sdk::Vec<Val>, Val)>;
+
+fn governance_events(env: &Env, governance_id: &Address) -> EventLog {
+    let mut out = soroban_sdk::Vec::new(env);
+    for (contract, topics, data) in env.events().all().iter() {
+        if &contract == governance_id {
+            out.push_back((topics, data));
+        }
+    }
+    out
+}
+
+fn last_governance_event(env: &Env, governance_id: &Address) -> (soroban_sdk::Vec<Val>, Val) {
+    governance_events(env, governance_id)
+        .last()
+        .expect("expected at least one governance event")
+}
+
+#[test]
+fn creating_a_proposal_emits_proposal_created() {
+    let env = Env::default();
+    env.ledger().set_sequence_number(GENESIS);
+    let (admin, _, governance_id) = deploy(&env, 1_000_000, QUORUM_BPS);
+
+    env.ledger().set_sequence_number(OPENED);
+    // Read the events straight after create_proposal: the test env exposes
+    // only the most recent invocation's events, so an intervening read call
+    // (get_proposal, say) would clear them.
+    let title = String::from_str(&env, "Raise the quorum threshold");
+    GovernanceContractClient::new(&env, &governance_id).create_proposal(
+        &admin,
+        &title,
+        &String::from_str(&env, "Move quorum_bps from 500 to 750."),
+    );
+
+    let (topics, data) = last_governance_event(&env, &governance_id);
+    assert_eq!(
+        topics,
+        (Symbol::new(&env, "proposal_created"), 1u64).into_val(&env)
+    );
+    assert_eq!(
+        ProposalCreated::try_from_val(&env, &data).unwrap(),
+        ProposalCreated {
+            id: 1,
+            proposer: admin,
+            title,
+            start_ledger: OPENED + 1,
+            end_ledger: OPENED + 1 + VOTING_PERIOD,
+            quorum_required: 50_000,
+        }
+    );
+}
+
+#[test]
+fn voting_emits_vote_cast_with_the_snapshot_weight() {
+    let env = Env::default();
+    let (admin, governance_id, proposal_id) = open_with_holders(&env, 1_000_000, QUORUM_BPS, &[]);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+
+    governance.vote(&admin, &proposal_id, &VOTE_ABSTAIN);
+
+    let (topics, data) = last_governance_event(&env, &governance_id);
+    assert_eq!(
+        topics,
+        (Symbol::new(&env, "vote_cast"), proposal_id, admin.clone()).into_val(&env)
+    );
+    assert_eq!(
+        VoteCast::try_from_val(&env, &data).unwrap(),
+        VoteCast {
+            proposal_id,
+            voter: admin,
+            support: VOTE_ABSTAIN,
+            voting_power: 1_000_000,
+        }
+    );
+}
+
+#[test]
+fn a_rejected_vote_emits_nothing() {
+    let env = Env::default();
+    let (_, governance_id, proposal_id) = open_with_holders(&env, 1_000_000, QUORUM_BPS, &[]);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+    let before = governance_events(&env, &governance_id).len();
+
+    // No voting power at the snapshot, so the vote is refused.
+    assert!(governance
+        .try_vote(&Address::generate(&env), &proposal_id, &VOTE_FOR)
+        .is_err());
+
+    assert_eq!(governance_events(&env, &governance_id).len(), before);
+}
+
+#[test]
+fn finalizing_a_passing_proposal_emits_finalized_then_queued() {
+    let env = Env::default();
+    let (admin, governance_id, proposal_id) = open_with_holders(&env, 1_000_000, QUORUM_BPS, &[]);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+
+    governance.vote(&admin, &proposal_id, &VOTE_FOR);
+    close_voting(&env, &governance, proposal_id);
+    let closed_at = env.ledger().sequence();
+    governance.finalize(&proposal_id);
+
+    let events = governance_events(&env, &governance_id);
+    let (queued_topics, queued_data) = events.last().unwrap();
+    let (finalized_topics, finalized_data) = events.get(events.len() - 2).unwrap();
+
+    assert_eq!(
+        finalized_topics,
+        (Symbol::new(&env, "proposal_finalized"), proposal_id).into_val(&env)
+    );
+    assert_eq!(
+        ProposalFinalized::try_from_val(&env, &finalized_data).unwrap(),
+        ProposalFinalized {
+            id: proposal_id,
+            status: ProposalStatus::Queued,
+            for_votes: 1_000_000,
+            against_votes: 0,
+            abstain_votes: 0,
+        }
+    );
+
+    assert_eq!(
+        queued_topics,
+        (Symbol::new(&env, "proposal_queued"), proposal_id).into_val(&env)
+    );
+    assert_eq!(
+        ProposalQueued::try_from_val(&env, &queued_data).unwrap(),
+        ProposalQueued {
+            id: proposal_id,
+            queue_ledger: closed_at + TIMELOCK_PERIOD,
+        }
+    );
+}
+
+#[test]
+fn a_failing_proposal_emits_finalized_without_queued() {
+    let env = Env::default();
+    let small_holder = Address::generate(&env);
+    let (_, governance_id, proposal_id) =
+        open_with_holders(&env, 1_000_000, 5_000, &[(small_holder.clone(), 1_000)]);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+
+    governance.vote(&small_holder, &proposal_id, &VOTE_FOR);
+    close_voting(&env, &governance, proposal_id);
+    governance.finalize(&proposal_id);
+
+    let (topics, data) = last_governance_event(&env, &governance_id);
+    assert_eq!(
+        topics,
+        (Symbol::new(&env, "proposal_finalized"), proposal_id).into_val(&env)
+    );
+    assert_eq!(
+        ProposalFinalized::try_from_val(&env, &data).unwrap().status,
+        ProposalStatus::Failed
+    );
+}
+
+#[test]
+fn executing_emits_proposal_executed() {
+    let env = Env::default();
+    let (admin, governance_id, proposal_id) = open_with_holders(&env, 1_000_000, QUORUM_BPS, &[]);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+    queue_proposal(&env, &governance, &admin, proposal_id);
+
+    env.ledger()
+        .set_sequence_number(governance.get_proposal(&proposal_id).queue_ledger);
+    governance.execute(&proposal_id);
+
+    let (topics, data) = last_governance_event(&env, &governance_id);
+    assert_eq!(
+        topics,
+        (Symbol::new(&env, "proposal_executed"), proposal_id).into_val(&env)
+    );
+    assert_eq!(
+        ProposalExecuted::try_from_val(&env, &data).unwrap(),
+        ProposalExecuted { id: proposal_id }
+    );
+}
+
+#[test]
+fn cancelling_emits_proposal_cancelled_with_the_caller() {
+    let env = Env::default();
+    let (admin, governance_id, proposal_id) = open_with_holders(&env, 1_000_000, QUORUM_BPS, &[]);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+
+    governance.cancel(&admin, &proposal_id);
+
+    let (topics, data) = last_governance_event(&env, &governance_id);
+    assert_eq!(
+        topics,
+        (Symbol::new(&env, "proposal_cancelled"), proposal_id).into_val(&env)
+    );
+    assert_eq!(
+        ProposalCancelled::try_from_val(&env, &data).unwrap(),
+        ProposalCancelled { id: proposal_id, caller: admin }
     );
 }
 
