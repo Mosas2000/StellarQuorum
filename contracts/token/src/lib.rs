@@ -1,6 +1,6 @@
 #![no_std]
 //! QUORUM — governance token for the Quorum protocol. SEP-41 compatible.
-use soroban_sdk::{contract, contractimpl, contracttype, contracterror, Address, Env, String, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, contracterror, Address, Env, String, Symbol, Vec};
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -28,6 +28,50 @@ pub struct Checkpoint {
     pub balance: i128,
 }
 
+/// Emitted when tokens move between accounts.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Transfer {
+    pub from: Address,
+    pub to: Address,
+    pub amount: i128,
+}
+
+/// Emitted when tokens are created. `total_supply` is the value after the mint,
+/// so an indexer can track supply from events alone.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Mint {
+    pub to: Address,
+    pub amount: i128,
+    pub total_supply: i128,
+}
+
+/// Emitted when tokens are destroyed. `total_supply` is the value after the
+/// burn.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Burn {
+    pub from: Address,
+    pub amount: i128,
+    pub total_supply: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Approve {
+    pub owner: Address,
+    pub spender: Address,
+    pub amount: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminTransferred {
+    pub previous_admin: Address,
+    pub new_admin: Address,
+}
+
 #[contracttype]
 pub enum DataKey {
     Admin, Name, Symbol, Decimals, TotalSupply,
@@ -50,6 +94,13 @@ impl QuorumToken {
         env.storage().instance().set(&DataKey::Decimals, &decimals);
         env.storage().instance().set(&DataKey::TotalSupply, &initial_supply);
         Self::set_balance(&env, &admin, initial_supply);
+
+        // The genesis allocation is a mint. Emitting it keeps supply
+        // reconstructible from events alone, with no special-case for deploy.
+        env.events().publish(
+            (Symbol::new(&env, "mint"), admin.clone()),
+            Mint { to: admin, amount: initial_supply, total_supply: initial_supply },
+        );
         Ok(())
     }
 
@@ -96,6 +147,11 @@ impl QuorumToken {
         Self::set_balance(&env, &from, from_bal - amount);
         let to_bal = Self::balance(env.clone(), to.clone());
         Self::set_balance(&env, &to, to_bal + amount);
+
+        env.events().publish(
+            (Symbol::new(&env, "transfer"), from.clone(), to.clone()),
+            Transfer { from, to, amount },
+        );
         Ok(())
     }
 
@@ -104,9 +160,15 @@ impl QuorumToken {
         admin.require_auth();
         if amount <= 0 { return Err(TokenError::InvalidAmount); }
         let supply: i128 = Self::total_supply(env.clone());
-        env.storage().instance().set(&DataKey::TotalSupply, &(supply + amount));
+        let total_supply = supply + amount;
+        env.storage().instance().set(&DataKey::TotalSupply, &total_supply);
         let bal = Self::balance(env.clone(), to.clone());
         Self::set_balance(&env, &to, bal + amount);
+
+        env.events().publish(
+            (Symbol::new(&env, "mint"), to.clone()),
+            Mint { to, amount, total_supply },
+        );
         Ok(())
     }
 
@@ -117,13 +179,24 @@ impl QuorumToken {
         if bal < amount { return Err(TokenError::InsufficientBalance); }
         Self::set_balance(&env, &from, bal - amount);
         let supply = Self::total_supply(env.clone());
-        env.storage().instance().set(&DataKey::TotalSupply, &(supply - amount));
+        let total_supply = supply - amount;
+        env.storage().instance().set(&DataKey::TotalSupply, &total_supply);
+
+        env.events().publish(
+            (Symbol::new(&env, "burn"), from.clone()),
+            Burn { from, amount, total_supply },
+        );
         Ok(())
     }
 
     pub fn approve(env: Env, owner: Address, spender: Address, amount: i128) -> Result<(), TokenError> {
         owner.require_auth();
         env.storage().persistent().set(&DataKey::Allowance(owner.clone(), spender.clone()), &amount);
+
+        env.events().publish(
+            (Symbol::new(&env, "approve"), owner.clone(), spender.clone()),
+            Approve { owner, spender, amount },
+        );
         Ok(())
     }
 
@@ -135,6 +208,11 @@ impl QuorumToken {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &new_admin);
+
+        env.events().publish(
+            (Symbol::new(&env, "admin_transferred"), admin.clone()),
+            AdminTransferred { previous_admin: admin, new_admin },
+        );
         Ok(())
     }
 

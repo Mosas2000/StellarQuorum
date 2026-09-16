@@ -837,16 +837,19 @@ fn voting_emits_vote_cast_with_the_snapshot_weight() {
 #[test]
 fn a_rejected_vote_emits_nothing() {
     let env = Env::default();
-    let (_, governance_id, proposal_id) = open_with_holders(&env, 1_000_000, QUORUM_BPS, &[]);
+    let (admin, governance_id, proposal_id) = open_with_holders(&env, 1_000_000, QUORUM_BPS, &[]);
     let governance = GovernanceContractClient::new(&env, &governance_id);
-    let before = governance_events(&env, &governance_id).len();
 
-    // No voting power at the snapshot, so the vote is refused.
+    // An accepted vote leaves exactly its own event behind...
+    governance.vote(&admin, &proposal_id, &VOTE_FOR);
+    assert_eq!(governance_events(&env, &governance_id).len(), 1);
+
+    // ...while a voter with no power at the snapshot is refused, and a failed
+    // invocation rolls back its events along with its state.
     assert!(governance
         .try_vote(&Address::generate(&env), &proposal_id, &VOTE_FOR)
         .is_err());
-
-    assert_eq!(governance_events(&env, &governance_id).len(), before);
+    assert!(governance_events(&env, &governance_id).is_empty());
 }
 
 #[test]

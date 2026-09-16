@@ -1,5 +1,6 @@
 use super::*;
-use soroban_sdk::testutils::{Address as _, Ledger as _};
+use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
+use soroban_sdk::{IntoVal, TryFromVal, Val};
 
 const INITIAL_SUPPLY: i128 = 1_000_000;
 
@@ -169,6 +170,169 @@ fn burn_beyond_balance_is_rejected() {
     );
     assert_eq!(token.balance(&holder), 1_000);
     assert_eq!(token.total_supply(), INITIAL_SUPPLY);
+}
+
+// ─── Events ──────────────────────────────────────────────────────────────────
+//
+// The test env exposes only the most recent invocation's events, so each of
+// these reads immediately after the emitting call.
+
+fn last_event(env: &Env) -> (soroban_sdk::Vec<Val>, Val) {
+    let (_, topics, data) = env
+        .events()
+        .all()
+        .last()
+        .expect("expected at least one event");
+    (topics, data)
+}
+
+#[test]
+fn initialize_emits_the_genesis_mint() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let token_id = env.register(QuorumToken, ());
+    QuorumTokenClient::new(&env, &token_id).initialize(
+        &admin,
+        &String::from_str(&env, "Quorum"),
+        &String::from_str(&env, "QUORUM"),
+        &7,
+        &INITIAL_SUPPLY,
+    );
+
+    let (topics, data) = last_event(&env);
+    assert_eq!(
+        topics,
+        (Symbol::new(&env, "mint"), admin.clone()).into_val(&env)
+    );
+    assert_eq!(
+        Mint::try_from_val(&env, &data).unwrap(),
+        Mint {
+            to: admin,
+            amount: INITIAL_SUPPLY,
+            total_supply: INITIAL_SUPPLY,
+        }
+    );
+}
+
+#[test]
+fn transfer_emits_a_transfer_event() {
+    let env = Env::default();
+    let (admin, token) = deploy(&env);
+    let recipient = Address::generate(&env);
+
+    token.transfer(&admin, &recipient, &250_000);
+
+    let (topics, data) = last_event(&env);
+    assert_eq!(
+        topics,
+        (Symbol::new(&env, "transfer"), admin.clone(), recipient.clone()).into_val(&env)
+    );
+    assert_eq!(
+        Transfer::try_from_val(&env, &data).unwrap(),
+        Transfer { from: admin, to: recipient, amount: 250_000 }
+    );
+}
+
+#[test]
+fn mint_emits_the_supply_after_the_mint() {
+    let env = Env::default();
+    let (_, token) = deploy(&env);
+    let recipient = Address::generate(&env);
+
+    token.mint(&recipient, &300_000);
+
+    let (topics, data) = last_event(&env);
+    assert_eq!(
+        topics,
+        (Symbol::new(&env, "mint"), recipient.clone()).into_val(&env)
+    );
+    assert_eq!(
+        Mint::try_from_val(&env, &data).unwrap(),
+        Mint {
+            to: recipient,
+            amount: 300_000,
+            total_supply: INITIAL_SUPPLY + 300_000,
+        }
+    );
+}
+
+#[test]
+fn burn_emits_the_supply_after_the_burn() {
+    let env = Env::default();
+    let (admin, token) = deploy(&env);
+
+    token.burn(&admin, &400_000);
+
+    let (topics, data) = last_event(&env);
+    assert_eq!(
+        topics,
+        (Symbol::new(&env, "burn"), admin.clone()).into_val(&env)
+    );
+    assert_eq!(
+        Burn::try_from_val(&env, &data).unwrap(),
+        Burn {
+            from: admin,
+            amount: 400_000,
+            total_supply: INITIAL_SUPPLY - 400_000,
+        }
+    );
+}
+
+#[test]
+fn approve_emits_an_approve_event() {
+    let env = Env::default();
+    let (admin, token) = deploy(&env);
+    let spender = Address::generate(&env);
+
+    token.approve(&admin, &spender, &50_000);
+
+    let (topics, data) = last_event(&env);
+    assert_eq!(
+        topics,
+        (Symbol::new(&env, "approve"), admin.clone(), spender.clone()).into_val(&env)
+    );
+    assert_eq!(
+        Approve::try_from_val(&env, &data).unwrap(),
+        Approve { owner: admin, spender, amount: 50_000 }
+    );
+}
+
+#[test]
+fn transfer_admin_emits_both_sides_of_the_handover() {
+    let env = Env::default();
+    let (admin, token) = deploy(&env);
+    let new_admin = Address::generate(&env);
+
+    token.transfer_admin(&new_admin);
+
+    let (topics, data) = last_event(&env);
+    assert_eq!(
+        topics,
+        (Symbol::new(&env, "admin_transferred"), admin.clone()).into_val(&env)
+    );
+    assert_eq!(
+        AdminTransferred::try_from_val(&env, &data).unwrap(),
+        AdminTransferred { previous_admin: admin, new_admin }
+    );
+}
+
+#[test]
+fn a_rejected_transfer_emits_nothing() {
+    let env = Env::default();
+    let (admin, token) = deploy(&env);
+    let recipient = Address::generate(&env);
+
+    // A successful transfer leaves exactly its own event behind...
+    token.transfer(&admin, &recipient, &1_000);
+    assert_eq!(env.events().all().len(), 1);
+
+    // ...while a rejected one leaves the log empty, since a failed invocation
+    // rolls back its events along with its state.
+    assert!(token
+        .try_transfer(&admin, &recipient, &(INITIAL_SUPPLY + 1))
+        .is_err());
+    assert!(env.events().all().is_empty());
 }
 
 // ─── Authorization ───────────────────────────────────────────────────────────
