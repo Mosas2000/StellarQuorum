@@ -35,6 +35,20 @@ pub enum GovernanceError {
 /// Basis-point denominator: `quorum_bps` of 500 means 5% of total supply.
 const BPS_DENOMINATOR: i128 = 10_000;
 
+/// Ledgers in roughly one day, at Stellar's ~5 second close time.
+const LEDGERS_PER_DAY: u32 = 17_280;
+
+/// Bump persistent entries whose remaining life has fallen below 30 days.
+///
+/// A proposal must stay readable for its whole voting window plus the timelock
+/// plus however long anyone later wants to audit the result. The create form
+/// already offers a 30-day voting period, so the threshold has to exceed that
+/// or a long-running proposal could expire mid-vote.
+const TTL_THRESHOLD: u32 = LEDGERS_PER_DAY * 30;
+
+/// Extend qualifying entries back out to 90 days.
+const TTL_EXTEND_TO: u32 = LEDGERS_PER_DAY * 90;
+
 /// Emitted when a proposal is opened.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -180,6 +194,8 @@ impl GovernanceContract {
         };
         env.storage().persistent().set(&DataKey::Proposal(id), &proposal);
         env.storage().instance().set(&DataKey::ProposalCount, &id);
+        Self::touch_proposal(&env, id);
+        Self::touch_instance(&env);
 
         env.events().publish(
             (Symbol::new(&env, "proposal_created"), id),
@@ -221,6 +237,9 @@ impl GovernanceContract {
         *tally = Self::add_weight(*tally, voting_power)?;
         env.storage().persistent().set(&DataKey::Proposal(proposal_id), &proposal);
         env.storage().persistent().set(&DataKey::HasVoted(proposal_id, voter.clone()), &support);
+        Self::touch_proposal(&env, proposal_id);
+        Self::touch_vote(&env, proposal_id, &voter);
+        Self::touch_instance(&env);
 
         env.events().publish(
             (Symbol::new(&env, "vote_cast"), proposal_id, voter.clone()),
@@ -243,6 +262,7 @@ impl GovernanceContract {
         } else { ProposalStatus::Failed };
         let status = proposal.status.clone();
         env.storage().persistent().set(&DataKey::Proposal(proposal_id), &proposal);
+        Self::touch_proposal(&env, proposal_id);
 
         env.events().publish(
             (Symbol::new(&env, "proposal_finalized"), proposal_id),
@@ -272,6 +292,7 @@ impl GovernanceContract {
         if env.ledger().sequence() < proposal.queue_ledger { return Err(GovernanceError::TimelockNotExpired); }
         proposal.status = ProposalStatus::Executed;
         env.storage().persistent().set(&DataKey::Proposal(proposal_id), &proposal);
+        Self::touch_proposal(&env, proposal_id);
         // TODO: dispatch on-chain actions encoded in proposal
 
         env.events().publish(
@@ -282,7 +303,15 @@ impl GovernanceContract {
     }
 
     pub fn get_proposal(env: Env, id: u64) -> Result<Proposal, GovernanceError> {
-        env.storage().persistent().get(&DataKey::Proposal(id)).ok_or(GovernanceError::ProposalNotFound)
+        let proposal: Proposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Proposal(id))
+            .ok_or(GovernanceError::ProposalNotFound)?;
+        // Reading keeps an entry alive: an actively watched proposal should not
+        // expire just because nobody has voted on it lately.
+        Self::touch_proposal(&env, id);
+        Ok(proposal)
     }
 
     pub fn get_proposal_count(env: Env) -> u64 {
@@ -316,6 +345,7 @@ impl GovernanceContract {
         }
         proposal.status = ProposalStatus::Cancelled;
         env.storage().persistent().set(&DataKey::Proposal(proposal_id), &proposal);
+        Self::touch_proposal(&env, proposal_id);
 
         env.events().publish(
             (Symbol::new(&env, "proposal_cancelled"), proposal_id),
@@ -332,6 +362,32 @@ impl GovernanceContract {
     /// Integer division truncates, so the threshold is never rounded up beyond
     /// what the supply supports. Uses checked arithmetic because a large supply
     /// multiplied by `quorum_bps` can exceed `i128::MAX`.
+    /// Extends the TTL of a proposal entry so a long voting window cannot
+    /// outlive its own storage.
+    fn touch_proposal(env: &Env, id: u64) {
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Proposal(id), TTL_THRESHOLD, TTL_EXTEND_TO);
+    }
+
+    /// Extends the TTL of a recorded vote, so `has_voted` and `get_vote` keep
+    /// answering for as long as the proposal itself survives.
+    fn touch_vote(env: &Env, id: u64, voter: &Address) {
+        env.storage().persistent().extend_ttl(
+            &DataKey::HasVoted(id, voter.clone()),
+            TTL_THRESHOLD,
+            TTL_EXTEND_TO,
+        );
+    }
+
+    /// Extends the TTL of instance storage, which holds Config and the proposal
+    /// counter. If this expired the contract would lose its configuration.
+    fn touch_instance(env: &Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(TTL_THRESHOLD, TTL_EXTEND_TO);
+    }
+
     /// Adds `weight` to a running vote tally.
     ///
     /// Returns `Overflow` rather than trapping. Token supply bounds the sum of

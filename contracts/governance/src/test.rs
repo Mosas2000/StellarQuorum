@@ -1,5 +1,6 @@
 use super::*;
 use quorum_token::{QuorumToken, QuorumTokenClient};
+use soroban_sdk::testutils::storage::Persistent as _;
 use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
 use soroban_sdk::{IntoVal, TryFromVal, Val};
 
@@ -749,6 +750,83 @@ fn a_cancelled_proposal_stops_accepting_votes() {
         governance.try_vote(&admin, &proposal_id, &VOTE_FOR),
         Err(Ok(GovernanceError::VotingNotActive))
     );
+}
+
+// ─── Storage lifetime ────────────────────────────────────────────────────────
+
+/// Remaining TTL, in ledgers, of a proposal entry.
+fn proposal_ttl(env: &Env, governance_id: &Address, id: u64) -> u32 {
+    env.as_contract(governance_id, || {
+        env.storage().persistent().get_ttl(&DataKey::Proposal(id))
+    })
+}
+
+#[test]
+fn creating_a_proposal_puts_its_entry_well_past_the_threshold() {
+    let env = Env::default();
+    env.ledger().set_sequence_number(GENESIS);
+    let (admin, _, governance_id) = deploy(&env, 1_000_000, QUORUM_BPS);
+
+    env.ledger().set_sequence_number(OPENED);
+    let id = propose(&env, &governance_id, &admin).id;
+
+    assert!(proposal_ttl(&env, &governance_id, id) >= TTL_THRESHOLD);
+}
+
+#[test]
+fn reading_a_proposal_extends_its_ttl() {
+    let env = Env::default();
+    env.ledger().set_sequence_number(GENESIS);
+    let (admin, _, governance_id) = deploy(&env, 1_000_000, QUORUM_BPS);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+
+    env.ledger().set_sequence_number(OPENED);
+    let id = propose(&env, &governance_id, &admin).id;
+
+    // Let most of the entry's life burn off, then read it.
+    env.ledger().set_sequence_number(OPENED + TTL_EXTEND_TO - 1_000);
+    let before = proposal_ttl(&env, &governance_id, id);
+    governance.get_proposal(&id);
+    let after = proposal_ttl(&env, &governance_id, id);
+
+    assert!(before < TTL_THRESHOLD, "entry should have aged below the threshold");
+    assert!(after > before, "read should have bumped the TTL");
+    assert!(after >= TTL_THRESHOLD);
+}
+
+#[test]
+fn a_proposal_outlives_a_long_voting_window() {
+    let env = Env::default();
+    env.ledger().set_sequence_number(GENESIS);
+    let (admin, _, governance_id) = deploy(&env, 1_000_000, QUORUM_BPS);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+
+    env.ledger().set_sequence_number(OPENED);
+    let id = propose(&env, &governance_id, &admin).id;
+
+    // Far past the 17_280 ledgers (~1 day) the issue calls out, and past the
+    // 30-day voting period the create form offers.
+    env.ledger()
+        .set_sequence_number(OPENED + LEDGERS_PER_DAY * 45);
+
+    assert_eq!(governance.get_proposal(&id).id, id);
+    // Instance storage carries Config; losing it would brick the contract.
+    assert_eq!(governance.get_config().quorum_bps, QUORUM_BPS);
+}
+
+#[test]
+fn a_recorded_vote_outlives_a_long_voting_window() {
+    let env = Env::default();
+    let (admin, governance_id, proposal_id) = open_with_holders(&env, 1_000_000, QUORUM_BPS, &[]);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+
+    governance.vote(&admin, &proposal_id, &VOTE_FOR);
+
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + LEDGERS_PER_DAY * 45);
+
+    assert!(governance.has_voted(&proposal_id, &admin));
+    assert_eq!(governance.get_vote(&proposal_id, &admin), Some(VOTE_FOR));
 }
 
 // ─── Events ──────────────────────────────────────────────────────────────────
