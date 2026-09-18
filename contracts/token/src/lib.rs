@@ -142,15 +142,30 @@ impl QuorumToken {
     pub fn transfer(env: Env, from: Address, to: Address, amount: i128) -> Result<(), TokenError> {
         from.require_auth();
         if amount <= 0 { return Err(TokenError::InvalidAmount); }
-        let from_bal = Self::balance(env.clone(), from.clone());
-        if from_bal < amount { return Err(TokenError::InsufficientBalance); }
-        Self::set_balance(&env, &from, from_bal - amount);
-        let to_bal = Self::balance(env.clone(), to.clone());
-        Self::set_balance(&env, &to, to_bal + amount);
+        Self::move_balance(&env, &from, &to, amount)
+    }
 
-        env.events().publish(
-            (Symbol::new(&env, "transfer"), from.clone(), to.clone()),
-            Transfer { from, to, amount },
+    /// Moves `amount` from `from` to `to` on behalf of `spender`, drawing on an
+    /// allowance the owner granted with `approve`.
+    ///
+    /// Required by SEP-41: without it no other contract can spend an approved
+    /// balance, which is what staking and delegation flows are built on.
+    pub fn transfer_from(env: Env, spender: Address, from: Address, to: Address, amount: i128) -> Result<(), TokenError> {
+        // The spender authorizes, not the owner — the owner already consented
+        // by approving.
+        spender.require_auth();
+        if amount <= 0 { return Err(TokenError::InvalidAmount); }
+
+        let allowed = Self::allowance(env.clone(), from.clone(), spender.clone());
+        if allowed < amount { return Err(TokenError::InsufficientAllowance); }
+
+        // Move first: it validates the balance and fails without touching the
+        // allowance, so a rejected spend cannot consume allowance.
+        Self::move_balance(&env, &from, &to, amount)?;
+
+        env.storage().persistent().set(
+            &DataKey::Allowance(from, spender),
+            &(allowed - amount),
         );
         Ok(())
     }
@@ -227,6 +242,29 @@ impl QuorumToken {
 /// Internal helpers — outside `#[contractimpl]` so they are not exported as
 /// contract functions.
 impl QuorumToken {
+    /// Debits `from`, credits `to`, and emits the transfer event.
+    ///
+    /// Shared by `transfer` and `transfer_from` so both paths apply the same
+    /// balance checks, write the same checkpoints and emit the same event —
+    /// an allowance spend is indistinguishable from a direct transfer to
+    /// anything watching balances.
+    fn move_balance(env: &Env, from: &Address, to: &Address, amount: i128) -> Result<(), TokenError> {
+        let from_bal = Self::balance(env.clone(), from.clone());
+        if from_bal < amount { return Err(TokenError::InsufficientBalance); }
+
+        Self::set_balance(env, from, from_bal - amount);
+        // Read `to` after debiting `from`, so a self-transfer nets to zero
+        // instead of crediting a stale balance.
+        let to_bal = Self::balance(env.clone(), to.clone());
+        Self::set_balance(env, to, to_bal + amount);
+
+        env.events().publish(
+            (Symbol::new(env, "transfer"), from.clone(), to.clone()),
+            Transfer { from: from.clone(), to: to.clone(), amount },
+        );
+        Ok(())
+    }
+
     fn checkpoints(env: &Env, owner: &Address) -> Vec<Checkpoint> {
         env.storage()
             .persistent()

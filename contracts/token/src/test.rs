@@ -119,6 +119,166 @@ fn transfer_of_a_non_positive_amount_is_rejected() {
     );
 }
 
+// ─── transfer_from ───────────────────────────────────────────────────────────
+
+#[test]
+fn transfer_from_spends_an_approved_allowance() {
+    let env = Env::default();
+    let (admin, token) = deploy(&env);
+    let spender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    token.approve(&admin, &spender, &50_000);
+
+    token.transfer_from(&spender, &admin, &recipient, &20_000);
+
+    assert_eq!(token.balance(&admin), INITIAL_SUPPLY - 20_000);
+    assert_eq!(token.balance(&recipient), 20_000);
+    // Allowance is reduced by exactly the amount spent.
+    assert_eq!(token.allowance(&admin, &spender), 30_000);
+    assert_eq!(token.total_supply(), INITIAL_SUPPLY);
+}
+
+#[test]
+fn transfer_from_can_spend_the_allowance_exactly() {
+    let env = Env::default();
+    let (admin, token) = deploy(&env);
+    let spender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    token.approve(&admin, &spender, &50_000);
+
+    token.transfer_from(&spender, &admin, &recipient, &50_000);
+
+    assert_eq!(token.allowance(&admin, &spender), 0);
+    assert_eq!(token.balance(&recipient), 50_000);
+
+    // Drained, so a further spend of even 1 is refused.
+    assert_eq!(
+        token.try_transfer_from(&spender, &admin, &recipient, &1),
+        Err(Ok(TokenError::InsufficientAllowance))
+    );
+}
+
+#[test]
+fn transfer_from_beyond_the_allowance_is_rejected() {
+    let env = Env::default();
+    let (admin, token) = deploy(&env);
+    let spender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    token.approve(&admin, &spender, &10_000);
+
+    assert_eq!(
+        token.try_transfer_from(&spender, &admin, &recipient, &10_001),
+        Err(Ok(TokenError::InsufficientAllowance))
+    );
+    assert_eq!(token.allowance(&admin, &spender), 10_000);
+    assert_eq!(token.balance(&recipient), 0);
+}
+
+#[test]
+fn transfer_from_without_any_allowance_is_rejected() {
+    let env = Env::default();
+    let (admin, token) = deploy(&env);
+    let stranger = Address::generate(&env);
+
+    assert_eq!(
+        token.try_transfer_from(&stranger, &admin, &stranger, &1),
+        Err(Ok(TokenError::InsufficientAllowance))
+    );
+    assert_eq!(token.balance(&admin), INITIAL_SUPPLY);
+}
+
+#[test]
+fn transfer_from_beyond_the_owner_balance_leaves_the_allowance_intact() {
+    let env = Env::default();
+    let (admin, token) = deploy(&env);
+    let owner = Address::generate(&env);
+    let spender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    // Approved for more than the owner actually holds.
+    token.transfer(&admin, &owner, &5_000);
+    token.approve(&owner, &spender, &50_000);
+
+    assert_eq!(
+        token.try_transfer_from(&spender, &owner, &recipient, &6_000),
+        Err(Ok(TokenError::InsufficientBalance))
+    );
+    // A failed spend must not burn allowance.
+    assert_eq!(token.allowance(&owner, &spender), 50_000);
+    assert_eq!(token.balance(&owner), 5_000);
+}
+
+#[test]
+fn transfer_from_of_a_non_positive_amount_is_rejected() {
+    let env = Env::default();
+    let (admin, token) = deploy(&env);
+    let spender = Address::generate(&env);
+    token.approve(&admin, &spender, &10_000);
+
+    assert_eq!(
+        token.try_transfer_from(&spender, &admin, &spender, &0),
+        Err(Ok(TokenError::InvalidAmount))
+    );
+    assert_eq!(
+        token.try_transfer_from(&spender, &admin, &spender, &-5),
+        Err(Ok(TokenError::InvalidAmount))
+    );
+}
+
+#[test]
+fn transfer_from_emits_a_transfer_event_naming_the_owner_not_the_spender() {
+    let env = Env::default();
+    let (admin, token) = deploy(&env);
+    let spender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    token.approve(&admin, &spender, &50_000);
+
+    token.transfer_from(&spender, &admin, &recipient, &20_000);
+
+    let (topics, data) = last_event(&env);
+    assert_eq!(
+        topics,
+        (Symbol::new(&env, "transfer"), admin.clone(), recipient.clone()).into_val(&env)
+    );
+    assert_eq!(
+        Transfer::try_from_val(&env, &data).unwrap(),
+        Transfer { from: admin, to: recipient, amount: 20_000 }
+    );
+}
+
+#[test]
+fn transfer_from_checkpoints_balances_for_snapshot_voting() {
+    let env = Env::default();
+    env.ledger().set_sequence_number(10);
+    let (admin, token) = deploy(&env);
+    let spender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    token.approve(&admin, &spender, &50_000);
+
+    env.ledger().set_sequence_number(20);
+    token.transfer_from(&spender, &admin, &recipient, &20_000);
+
+    // An allowance spend must move voting power like any other transfer.
+    assert_eq!(token.get_past_balance(&recipient, &19), 0);
+    assert_eq!(token.get_past_balance(&recipient, &20), 20_000);
+}
+
+#[test]
+fn transfer_from_without_spender_authorization_is_rejected() {
+    let env = Env::default();
+    let (admin, token) = deploy(&env);
+    let spender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    token.approve(&admin, &spender, &50_000);
+
+    env.set_auths(&[]);
+
+    assert!(token
+        .try_transfer_from(&spender, &admin, &recipient, &1_000)
+        .is_err());
+    assert_eq!(token.balance(&recipient), 0);
+}
+
 // ─── Mint & burn ─────────────────────────────────────────────────────────────
 
 #[test]
