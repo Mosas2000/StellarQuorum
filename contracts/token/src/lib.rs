@@ -12,6 +12,7 @@ pub enum TokenError {
     InsufficientAllowance = 4,
     InvalidAmount         = 5,
     Overflow              = 6,
+    InvalidExpiration     = 7,
 }
 
 /// A balance recorded at the ledger on which it changed.
@@ -63,6 +64,18 @@ pub struct Approve {
     pub owner: Address,
     pub spender: Address,
     pub amount: i128,
+    pub expiration_ledger: u32,
+}
+
+/// A stored allowance and the ledger it lapses after.
+///
+/// SEP-41 requires allowances to expire: a permanent approval left on a
+/// compromised or abandoned spender is a standing claim on the owner's balance.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AllowanceValue {
+    pub amount: i128,
+    pub expiration_ledger: u32,
 }
 
 #[contracttype]
@@ -156,16 +169,23 @@ impl QuorumToken {
         spender.require_auth();
         if amount <= 0 { return Err(TokenError::InvalidAmount); }
 
-        let allowed = Self::allowance(env.clone(), from.clone(), spender.clone());
-        if allowed < amount { return Err(TokenError::InsufficientAllowance); }
+        // Reads as zero if the approval has lapsed, so an expired allowance
+        // fails here as InsufficientAllowance.
+        let approval = Self::live_allowance(&env, &from, &spender);
+        if approval.amount < amount { return Err(TokenError::InsufficientAllowance); }
 
         // Move first: it validates the balance and fails without touching the
         // allowance, so a rejected spend cannot consume allowance.
         Self::move_balance(&env, &from, &to, amount)?;
 
+        // Debiting keeps the original expiry — spending part of an allowance
+        // must not extend the remainder's life.
         env.storage().persistent().set(
             &DataKey::Allowance(from, spender),
-            &(allowed - amount),
+            &AllowanceValue {
+                amount: approval.amount - amount,
+                expiration_ledger: approval.expiration_ledger,
+            },
         );
         Ok(())
     }
@@ -204,19 +224,38 @@ impl QuorumToken {
         Ok(())
     }
 
-    pub fn approve(env: Env, owner: Address, spender: Address, amount: i128) -> Result<(), TokenError> {
+    /// Grants `spender` the right to move up to `amount` of `owner`'s balance,
+    /// until `expiration_ledger` has passed.
+    ///
+    /// Per SEP-41, a live approval (`amount > 0`) must not expire in the past.
+    /// A zero `amount` is a revocation and accepts any expiration, which is how
+    /// an owner cancels an approval they can no longer honour.
+    pub fn approve(env: Env, owner: Address, spender: Address, amount: i128, expiration_ledger: u32) -> Result<(), TokenError> {
         owner.require_auth();
-        env.storage().persistent().set(&DataKey::Allowance(owner.clone(), spender.clone()), &amount);
+        if amount < 0 { return Err(TokenError::InvalidAmount); }
+        if amount > 0 && expiration_ledger < env.ledger().sequence() {
+            return Err(TokenError::InvalidExpiration);
+        }
+
+        env.storage().persistent().set(
+            &DataKey::Allowance(owner.clone(), spender.clone()),
+            &AllowanceValue { amount, expiration_ledger },
+        );
 
         env.events().publish(
             (Symbol::new(&env, "approve"), owner.clone(), spender.clone()),
-            Approve { owner, spender, amount },
+            Approve { owner, spender, amount, expiration_ledger },
         );
         Ok(())
     }
 
+    /// Amount `spender` may still draw from `owner`, or 0 once the approval has
+    /// lapsed.
+    ///
+    /// An expired allowance reads as 0 rather than erroring, so callers cannot
+    /// accidentally treat a lapsed approval as spendable.
     pub fn allowance(env: Env, owner: Address, spender: Address) -> i128 {
-        env.storage().persistent().get(&DataKey::Allowance(owner, spender)).unwrap_or(0)
+        Self::live_allowance(&env, &owner, &spender).amount
     }
 
     pub fn transfer_admin(env: Env, new_admin: Address) -> Result<(), TokenError> {
@@ -242,6 +281,21 @@ impl QuorumToken {
 /// Internal helpers — outside `#[contractimpl]` so they are not exported as
 /// contract functions.
 impl QuorumToken {
+    /// The stored allowance if it is still live, otherwise a zero allowance.
+    ///
+    /// Returning a zeroed value rather than `None` keeps the expiry check in
+    /// one place: every spender path treats a lapsed approval as empty.
+    fn live_allowance(env: &Env, owner: &Address, spender: &Address) -> AllowanceValue {
+        match env
+            .storage()
+            .persistent()
+            .get::<_, AllowanceValue>(&DataKey::Allowance(owner.clone(), spender.clone()))
+        {
+            Some(allowance) if allowance.expiration_ledger >= env.ledger().sequence() => allowance,
+            _ => AllowanceValue { amount: 0, expiration_ledger: 0 },
+        }
+    }
+
     /// Debits `from`, credits `to`, and emits the transfer event.
     ///
     /// Shared by `transfer` and `transfer_from` so both paths apply the same

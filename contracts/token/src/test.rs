@@ -3,6 +3,9 @@ use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
 use soroban_sdk::{IntoVal, TryFromVal, Val};
 
 const INITIAL_SUPPLY: i128 = 1_000_000;
+/// Expiry far enough out that approvals stay live for tests that are not about
+/// expiry.
+const FAR_FUTURE: u32 = 1_000_000;
 
 fn deploy(env: &Env) -> (Address, QuorumTokenClient<'_>) {
     env.mock_all_auths();
@@ -127,7 +130,7 @@ fn transfer_from_spends_an_approved_allowance() {
     let (admin, token) = deploy(&env);
     let spender = Address::generate(&env);
     let recipient = Address::generate(&env);
-    token.approve(&admin, &spender, &50_000);
+    token.approve(&admin, &spender, &50_000, &FAR_FUTURE);
 
     token.transfer_from(&spender, &admin, &recipient, &20_000);
 
@@ -144,7 +147,7 @@ fn transfer_from_can_spend_the_allowance_exactly() {
     let (admin, token) = deploy(&env);
     let spender = Address::generate(&env);
     let recipient = Address::generate(&env);
-    token.approve(&admin, &spender, &50_000);
+    token.approve(&admin, &spender, &50_000, &FAR_FUTURE);
 
     token.transfer_from(&spender, &admin, &recipient, &50_000);
 
@@ -164,7 +167,7 @@ fn transfer_from_beyond_the_allowance_is_rejected() {
     let (admin, token) = deploy(&env);
     let spender = Address::generate(&env);
     let recipient = Address::generate(&env);
-    token.approve(&admin, &spender, &10_000);
+    token.approve(&admin, &spender, &10_000, &FAR_FUTURE);
 
     assert_eq!(
         token.try_transfer_from(&spender, &admin, &recipient, &10_001),
@@ -197,7 +200,7 @@ fn transfer_from_beyond_the_owner_balance_leaves_the_allowance_intact() {
 
     // Approved for more than the owner actually holds.
     token.transfer(&admin, &owner, &5_000);
-    token.approve(&owner, &spender, &50_000);
+    token.approve(&owner, &spender, &50_000, &FAR_FUTURE);
 
     assert_eq!(
         token.try_transfer_from(&spender, &owner, &recipient, &6_000),
@@ -213,7 +216,7 @@ fn transfer_from_of_a_non_positive_amount_is_rejected() {
     let env = Env::default();
     let (admin, token) = deploy(&env);
     let spender = Address::generate(&env);
-    token.approve(&admin, &spender, &10_000);
+    token.approve(&admin, &spender, &10_000, &FAR_FUTURE);
 
     assert_eq!(
         token.try_transfer_from(&spender, &admin, &spender, &0),
@@ -231,7 +234,7 @@ fn transfer_from_emits_a_transfer_event_naming_the_owner_not_the_spender() {
     let (admin, token) = deploy(&env);
     let spender = Address::generate(&env);
     let recipient = Address::generate(&env);
-    token.approve(&admin, &spender, &50_000);
+    token.approve(&admin, &spender, &50_000, &FAR_FUTURE);
 
     token.transfer_from(&spender, &admin, &recipient, &20_000);
 
@@ -253,7 +256,7 @@ fn transfer_from_checkpoints_balances_for_snapshot_voting() {
     let (admin, token) = deploy(&env);
     let spender = Address::generate(&env);
     let recipient = Address::generate(&env);
-    token.approve(&admin, &spender, &50_000);
+    token.approve(&admin, &spender, &50_000, &FAR_FUTURE);
 
     env.ledger().set_sequence_number(20);
     token.transfer_from(&spender, &admin, &recipient, &20_000);
@@ -269,7 +272,7 @@ fn transfer_from_without_spender_authorization_is_rejected() {
     let (admin, token) = deploy(&env);
     let spender = Address::generate(&env);
     let recipient = Address::generate(&env);
-    token.approve(&admin, &spender, &50_000);
+    token.approve(&admin, &spender, &50_000, &FAR_FUTURE);
 
     env.set_auths(&[]);
 
@@ -445,7 +448,7 @@ fn approve_emits_an_approve_event() {
     let (admin, token) = deploy(&env);
     let spender = Address::generate(&env);
 
-    token.approve(&admin, &spender, &50_000);
+    token.approve(&admin, &spender, &50_000, &FAR_FUTURE);
 
     let (topics, data) = last_event(&env);
     assert_eq!(
@@ -454,7 +457,7 @@ fn approve_emits_an_approve_event() {
     );
     assert_eq!(
         Approve::try_from_val(&env, &data).unwrap(),
-        Approve { owner: admin, spender, amount: 50_000 }
+        Approve { owner: admin, spender, amount: 50_000, expiration_ledger: FAR_FUTURE }
     );
 }
 
@@ -559,7 +562,7 @@ fn approve_records_an_allowance_per_owner_spender_pair() {
     let spender = Address::generate(&env);
     let other_spender = Address::generate(&env);
 
-    token.approve(&admin, &spender, &50_000);
+    token.approve(&admin, &spender, &50_000, &FAR_FUTURE);
 
     assert_eq!(token.allowance(&admin, &spender), 50_000);
     // Allowances are per pair, not per owner.
@@ -573,10 +576,150 @@ fn approve_overwrites_a_previous_allowance() {
     let (admin, token) = deploy(&env);
     let spender = Address::generate(&env);
 
-    token.approve(&admin, &spender, &50_000);
-    token.approve(&admin, &spender, &10_000);
+    token.approve(&admin, &spender, &50_000, &FAR_FUTURE);
+    token.approve(&admin, &spender, &10_000, &FAR_FUTURE);
 
     assert_eq!(token.allowance(&admin, &spender), 10_000);
+}
+
+// ─── Allowance expiry ────────────────────────────────────────────────────────
+
+#[test]
+fn an_allowance_reads_as_zero_once_its_expiry_has_passed() {
+    let env = Env::default();
+    env.ledger().set_sequence_number(100);
+    let (admin, token) = deploy(&env);
+    let spender = Address::generate(&env);
+
+    token.approve(&admin, &spender, &50_000, &200);
+
+    // Live right up to and including the expiry ledger.
+    env.ledger().set_sequence_number(200);
+    assert_eq!(token.allowance(&admin, &spender), 50_000);
+
+    // Lapsed the ledger after.
+    env.ledger().set_sequence_number(201);
+    assert_eq!(token.allowance(&admin, &spender), 0);
+}
+
+#[test]
+fn transfer_from_with_an_expired_allowance_is_rejected() {
+    let env = Env::default();
+    env.ledger().set_sequence_number(100);
+    let (admin, token) = deploy(&env);
+    let spender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    token.approve(&admin, &spender, &50_000, &200);
+
+    env.ledger().set_sequence_number(201);
+    assert_eq!(
+        token.try_transfer_from(&spender, &admin, &recipient, &1_000),
+        Err(Ok(TokenError::InsufficientAllowance))
+    );
+    assert_eq!(token.balance(&recipient), 0);
+    assert_eq!(token.balance(&admin), INITIAL_SUPPLY);
+}
+
+#[test]
+fn an_allowance_is_spendable_right_up_to_its_expiry() {
+    let env = Env::default();
+    env.ledger().set_sequence_number(100);
+    let (admin, token) = deploy(&env);
+    let spender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    token.approve(&admin, &spender, &50_000, &200);
+
+    env.ledger().set_sequence_number(200);
+    token.transfer_from(&spender, &admin, &recipient, &50_000);
+
+    assert_eq!(token.balance(&recipient), 50_000);
+}
+
+#[test]
+fn spending_part_of_an_allowance_does_not_extend_the_remainder() {
+    let env = Env::default();
+    env.ledger().set_sequence_number(100);
+    let (admin, token) = deploy(&env);
+    let spender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    token.approve(&admin, &spender, &50_000, &200);
+
+    env.ledger().set_sequence_number(150);
+    token.transfer_from(&spender, &admin, &recipient, &20_000);
+    assert_eq!(token.allowance(&admin, &spender), 30_000);
+
+    // The remaining 30_000 still dies at the original expiry, not 50 ledgers
+    // after the partial spend.
+    env.ledger().set_sequence_number(201);
+    assert_eq!(token.allowance(&admin, &spender), 0);
+}
+
+#[test]
+fn an_approval_that_expires_in_the_past_is_rejected() {
+    let env = Env::default();
+    env.ledger().set_sequence_number(100);
+    let (admin, token) = deploy(&env);
+    let spender = Address::generate(&env);
+
+    assert_eq!(
+        token.try_approve(&admin, &spender, &50_000, &99),
+        Err(Ok(TokenError::InvalidExpiration))
+    );
+    // A zero expiry is in the past for any real ledger, so it is refused too.
+    assert_eq!(
+        token.try_approve(&admin, &spender, &50_000, &0),
+        Err(Ok(TokenError::InvalidExpiration))
+    );
+    assert_eq!(token.allowance(&admin, &spender), 0);
+}
+
+#[test]
+fn an_approval_expiring_on_the_current_ledger_is_accepted() {
+    let env = Env::default();
+    env.ledger().set_sequence_number(100);
+    let (admin, token) = deploy(&env);
+    let spender = Address::generate(&env);
+
+    // Valid for the remainder of this ledger only.
+    token.approve(&admin, &spender, &50_000, &100);
+    assert_eq!(token.allowance(&admin, &spender), 50_000);
+
+    env.ledger().set_sequence_number(101);
+    assert_eq!(token.allowance(&admin, &spender), 0);
+}
+
+#[test]
+fn a_zero_amount_revokes_an_allowance_regardless_of_expiry() {
+    let env = Env::default();
+    env.ledger().set_sequence_number(100);
+    let (admin, token) = deploy(&env);
+    let spender = Address::generate(&env);
+    token.approve(&admin, &spender, &50_000, &FAR_FUTURE);
+
+    // Revocation carries no live amount, so SEP-41's expiry rule does not
+    // apply — an owner must always be able to cancel an approval.
+    token.approve(&admin, &spender, &0, &0);
+
+    assert_eq!(token.allowance(&admin, &spender), 0);
+    assert_eq!(
+        token.try_transfer_from(&spender, &admin, &spender, &1),
+        Err(Ok(TokenError::InsufficientAllowance))
+    );
+}
+
+#[test]
+fn a_negative_approval_is_rejected() {
+    let env = Env::default();
+    let (admin, token) = deploy(&env);
+    let spender = Address::generate(&env);
+
+    assert_eq!(
+        token.try_approve(&admin, &spender, &-1, &FAR_FUTURE),
+        Err(Ok(TokenError::InvalidAmount))
+    );
 }
 
 // ─── Admin ───────────────────────────────────────────────────────────────────
