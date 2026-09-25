@@ -1,0 +1,78 @@
+# Issue #172: automated dependency updates.
+#
+# One entry per lockfile: Dependabot resolves each ecosystem inside its own
+# `directory`, and this repo keeps Cargo and npm lockfiles in subdirectories.
+# The root package.json has no dependencies and no lockfile, so there is no
+# `/` npm entry — adding one would only produce failing update jobs.
+#
+# Cadence: weekly for code (cargo, npm), monthly for the actions CI pins.
+# Minor and patch bumps are grouped per ecosystem so they arrive as one
+# reviewable PR; major bumps stay individual because they need their own
+# testing and changelog reading.
+version: 2
+updates:
+  # contracts/Cargo.lock
+  - package-ecosystem: cargo
+    directory: /contracts
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - contract
+    commit-message:
+      prefix: deps
+    groups:
+      cargo-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # frontend/package-lock.json
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - frontend
+    commit-message:
+      prefix: deps
+    groups:
+      npm-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # sdk/package-lock.json
+  - package-ecosystem: npm
+    directory: /sdk
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - sdk
+    commit-message:
+      prefix: deps
+    groups:
+      npm-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # .github/workflows/*.yml — `directory: /` is where the actions live.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    labels:
+      - ci
+    commit-message:
+      prefix: ci
+    groups:
+      github-actions:
+        patterns:
+          - "*"
