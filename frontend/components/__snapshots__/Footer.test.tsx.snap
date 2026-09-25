@@ -1,0 +1,13 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`Footer matches the visual baseline 1`] = `
+{
+  "attrs": {
+    "class": "border-t border-[#1a2535] py-8 text-center text-sm text-slate-600",
+  },
+  "children": [
+    "Quorum · Built for the Stellar Ecosystem · Drips Wave Contributor · MIT License",
+  ],
+  "tag": "footer",
+}
+`;

@@ -1,0 +1,72 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`Navbar matches the visual baseline 1`] = `
+{
+  "attrs": {
+    "class": "border-b border-[#1a2535] bg-[#080c10]/90 backdrop-blur sticky top-0 z-50",
+  },
+  "children": [
+    {
+      "attrs": {
+        "class": "max-w-6xl mx-auto px-6 h-16 flex items-center justify-between",
+      },
+      "children": [
+        {
+          "attrs": {
+            "class": "flex items-center gap-2 font-bold text-lg text-blue-400 hover:text-blue-300 transition-colors",
+            "href": "/",
+          },
+          "children": [
+            {
+              "attrs": {},
+              "children": [],
+              "tag": "svg",
+            },
+            "Quorum",
+          ],
+          "tag": "a",
+        },
+        {
+          "attrs": {
+            "class": "flex items-center gap-6 text-sm text-slate-400",
+          },
+          "children": [
+            {
+              "attrs": {
+                "class": "hover:text-slate-200 hover:underline underline-offset-4 transition-colors",
+                "href": "/proposals",
+              },
+              "children": [
+                "Proposals",
+              ],
+              "tag": "a",
+            },
+            {
+              "attrs": {
+                "class": "hover:text-slate-200 hover:underline underline-offset-4 transition-colors",
+                "href": "/create",
+              },
+              "children": [
+                "Create",
+              ],
+              "tag": "a",
+            },
+            {
+              "attrs": {
+                "class": "px-4 py-1.5 border border-blue-700 text-blue-400 hover:bg-blue-900/30 rounded-md transition-colors",
+              },
+              "children": [
+                "Connect Wallet",
+              ],
+              "tag": "button",
+            },
+          ],
+          "tag": "div",
+        },
+      ],
+      "tag": "div",
+    },
+  ],
+  "tag": "nav",
+}
+`;
