@@ -49,14 +49,17 @@ All passed proposals enter a 48-hour timelock before execution. A guardian multi
 
 Quorum participates in the **Stellar Wave** on [Drips Network](https://www.drips.network/wave).
 
-Open issues are sized with point labels:
+Rewarded issues use `drips:*` labels to show the expected points value:
 
 | Label | Scope |
 |---|---|
-| `drips:1` | Small docs, style, or good-first-issue tasks |
-| `drips:3` | Medium components, SDK methods, or test coverage |
-| `drips:5` | Larger pages, Soroban contract functions, or integrations |
-| `drips:8` | Complex feature work or security-sensitive contract changes |
+| `drips:1` | Small tasks such as docs, styling, and good first issues |
+| `drips:3` | Medium tasks such as new components or focused test coverage |
+| `drips:5` | Large tasks such as new pages or contract functions |
+| `drips:8` | Complex tasks such as full features or security-sensitive work |
+
+See [docs/contributing.md](docs/contributing.md#drips-wave) for the contributor
+claim flow and maintainer setup checklist.
 
 **Good first issues:**
 - Build the Freighter wallet connection component
