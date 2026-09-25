@@ -1,7 +1,7 @@
 use super::*;
 use quorum_token::{QuorumToken, QuorumTokenClient};
 use soroban_sdk::testutils::storage::Persistent as _;
-use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
+use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke};
 use soroban_sdk::{IntoVal, TryFromVal, Val};
 
 const QUORUM_BPS: u32 = 500; // 5%
@@ -1090,4 +1090,350 @@ fn quorum_for_supply_rejects_overflow_instead_of_panicking() {
         GovernanceContract::quorum_for_supply(i128::MAX, 10_000),
         Err(GovernanceError::Overflow)
     );
+}
+
+// ─── Full cross-contract lifecycle (#162) ──────────────────────────────────────
+//
+// Every other test in this file exercises one step of the lifecycle in
+// isolation. This one walks the entire path end to end — deploy both
+// contracts, distribute tokens, open a proposal, vote from several holders,
+// finalize, wait out the timelock, execute — checking both state and emitted
+// events at each step, plus the failing (quorum not reached) branch.
+
+#[test]
+fn full_lifecycle_passes_and_executes_after_timelock() {
+    let env = Env::default();
+    env.ledger().set_sequence_number(GENESIS);
+    let (admin, token_id, governance_id) = deploy(&env, 1_000_000, QUORUM_BPS);
+    let token = QuorumTokenClient::new(&env, &token_id);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+
+    // Distribute tokens to several holders before the snapshot is taken.
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    let carol = Address::generate(&env);
+    token.transfer(&admin, &alice, &300_000);
+    token.transfer(&admin, &bob, &200_000);
+    token.transfer(&admin, &carol, &100_000);
+    // admin retains 400_000
+
+    // ── Open a proposal ──
+    env.ledger().set_sequence_number(GENESIS + 10);
+    let title = String::from_str(&env, "Increase treasury allocation");
+    let description = String::from_str(&env, "Allocate more funds to the treasury.");
+    let id = governance.create_proposal(&alice, &title, &description);
+
+    let (topics, data) = last_governance_event(&env, &governance_id);
+    assert_eq!(topics, (Symbol::new(&env, "proposal_created"), id).into_val(&env));
+    let created = ProposalCreated::try_from_val(&env, &data).unwrap();
+    assert_eq!(created.id, id);
+    assert_eq!(created.proposer, alice);
+
+    let proposal = governance.get_proposal(&id);
+    assert_eq!(proposal.status, ProposalStatus::Active);
+    assert_eq!(proposal.snapshot_ledger, GENESIS + 10);
+
+    // ── Vote from several holders ──
+    env.ledger().set_sequence_number(proposal.start_ledger);
+
+    governance.vote(&alice, &id, &VOTE_FOR);
+    let (_, data) = last_governance_event(&env, &governance_id);
+    assert_eq!(
+        VoteCast::try_from_val(&env, &data).unwrap(),
+        VoteCast { proposal_id: id, voter: alice.clone(), support: VOTE_FOR, voting_power: 300_000 }
+    );
+
+    governance.vote(&bob, &id, &VOTE_FOR);
+    let (_, data) = last_governance_event(&env, &governance_id);
+    assert_eq!(
+        VoteCast::try_from_val(&env, &data).unwrap(),
+        VoteCast { proposal_id: id, voter: bob.clone(), support: VOTE_FOR, voting_power: 200_000 }
+    );
+
+    governance.vote(&carol, &id, &VOTE_AGAINST);
+    let (_, data) = last_governance_event(&env, &governance_id);
+    assert_eq!(
+        VoteCast::try_from_val(&env, &data).unwrap(),
+        VoteCast { proposal_id: id, voter: carol.clone(), support: VOTE_AGAINST, voting_power: 100_000 }
+    );
+
+    assert!(governance.has_voted(&id, &alice));
+    assert_eq!(governance.get_vote(&id, &bob), Some(VOTE_FOR));
+
+    // ── Finalize: quorum met (600_000 of 1_000_000 >= 5%), for > against ──
+    env.ledger().set_sequence_number(proposal.end_ledger + 1);
+    let status = governance.finalize(&id);
+    assert_eq!(status, ProposalStatus::Queued);
+
+    let finalized = governance.get_proposal(&id);
+    assert_eq!(finalized.for_votes, 500_000);
+    assert_eq!(finalized.against_votes, 100_000);
+    assert_eq!(finalized.abstain_votes, 0);
+    assert_eq!(finalized.status, ProposalStatus::Queued);
+    assert!(finalized.queue_ledger > env.ledger().sequence());
+
+    // finalize() on the passing path emits both proposal_finalized and, last,
+    // proposal_queued — governance_events() preserves call order.
+    let events = governance_events(&env, &governance_id);
+    assert_eq!(events.len(), 2);
+    let (finalized_topics, finalized_data) = events.get(0).unwrap();
+    assert_eq!(
+        finalized_topics,
+        (Symbol::new(&env, "proposal_finalized"), id).into_val(&env)
+    );
+    assert_eq!(
+        ProposalFinalized::try_from_val(&env, &finalized_data).unwrap(),
+        ProposalFinalized {
+            id,
+            status: ProposalStatus::Queued,
+            for_votes: 500_000,
+            against_votes: 100_000,
+            abstain_votes: 0,
+        }
+    );
+    let (queued_topics, queued_data) = events.get(1).unwrap();
+    assert_eq!(queued_topics, (Symbol::new(&env, "proposal_queued"), id).into_val(&env));
+    assert_eq!(
+        ProposalQueued::try_from_val(&env, &queued_data).unwrap(),
+        ProposalQueued { id, queue_ledger: finalized.queue_ledger }
+    );
+
+    // ── Wait out the timelock and execute ──
+    env.ledger().set_sequence_number(finalized.queue_ledger);
+    governance.execute(&id);
+
+    let (topics, data) = last_governance_event(&env, &governance_id);
+    assert_eq!(topics, (Symbol::new(&env, "proposal_executed"), id).into_val(&env));
+    assert_eq!(
+        ProposalExecuted::try_from_val(&env, &data).unwrap(),
+        ProposalExecuted { id }
+    );
+
+    let executed = governance.get_proposal(&id);
+    assert_eq!(executed.status, ProposalStatus::Executed);
+}
+
+#[test]
+fn full_lifecycle_fails_when_quorum_is_not_reached() {
+    let env = Env::default();
+    env.ledger().set_sequence_number(GENESIS);
+    // 20% quorum on a 1_000_000 supply requires 200_000 votes.
+    let (admin, token_id, governance_id) = deploy(&env, 1_000_000, 2_000);
+    let token = QuorumTokenClient::new(&env, &token_id);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+
+    let small_holder = Address::generate(&env);
+    token.transfer(&admin, &small_holder, &50_000);
+
+    env.ledger().set_sequence_number(GENESIS + 10);
+    let id = governance.create_proposal(
+        &admin,
+        &String::from_str(&env, "Small ask"),
+        &String::from_str(&env, "Only a minority shows up to vote."),
+    );
+    let proposal = governance.get_proposal(&id);
+
+    env.ledger().set_sequence_number(proposal.start_ledger);
+    governance.vote(&small_holder, &id, &VOTE_FOR);
+
+    // Only 50_000 of the required 200_000 voted — quorum not reached even
+    // though every cast vote was in favour.
+    env.ledger().set_sequence_number(proposal.end_ledger + 1);
+    let status = governance.finalize(&id);
+    assert_eq!(status, ProposalStatus::Failed);
+
+    let (topics, data) = last_governance_event(&env, &governance_id);
+    assert_eq!(topics, (Symbol::new(&env, "proposal_finalized"), id).into_val(&env));
+    assert_eq!(
+        ProposalFinalized::try_from_val(&env, &data).unwrap(),
+        ProposalFinalized {
+            id,
+            status: ProposalStatus::Failed,
+            for_votes: 50_000,
+            against_votes: 0,
+            abstain_votes: 0,
+        }
+    );
+
+    // A failed proposal is not queued and cannot be executed.
+    let failed = governance.get_proposal(&id);
+    assert_eq!(failed.status, ProposalStatus::Failed);
+    assert_eq!(failed.queue_ledger, 0);
+    assert_eq!(
+        governance.try_execute(&id),
+        Err(Ok(GovernanceError::ProposalNotPassed))
+    );
+}
+
+// ─── Cross-contract authorization (#163) ──────────────────────────────────────
+//
+// The tests above (and `deploy`/`open_with_holders`) run under
+// `mock_all_auths()`, which makes every `require_auth()` call succeed — great
+// for exercising contract logic, but it proves nothing about which calls
+// actually carry authorization. These tests mock only the specific
+// invocations expected to require auth, so an accidental extra
+// `require_auth()` deeper in the call tree (or a missing one) would show up
+// as a failure here instead of silently passing under `mock_all_auths()`.
+//
+// `token.balance()`, `token.total_supply()` and `token.get_past_balance()` —
+// the three cross-invocations governance makes — call no `require_auth()`
+// today (that's the premise of #163: it'll change once delegation lands), so
+// mocking only the top-level proposer/voter call, with no `sub_invokes`, and
+// having it succeed is itself the proof that these reads carry no hidden
+// authorization requirement.
+
+fn deploy_with_explicit_auth(
+    env: &Env,
+    initial_supply: i128,
+    quorum_bps: u32,
+) -> (Address, Address, Address) {
+    let admin = Address::generate(env);
+    let name = String::from_str(env, "Quorum");
+    let symbol = String::from_str(env, "QUORUM");
+
+    let token_id = env.register(QuorumToken, ());
+    env.mock_auths(&[MockAuth {
+        address: &admin,
+        invoke: &MockAuthInvoke {
+            contract: &token_id,
+            fn_name: "initialize",
+            args: (admin.clone(), name.clone(), symbol.clone(), 7u32, initial_supply)
+                .into_val(env),
+            sub_invokes: &[],
+        },
+    }]);
+    QuorumTokenClient::new(env, &token_id).initialize(&admin, &name, &symbol, &7, &initial_supply);
+
+    let governance_id = env.register(GovernanceContract, ());
+    env.mock_auths(&[MockAuth {
+        address: &admin,
+        invoke: &MockAuthInvoke {
+            contract: &governance_id,
+            fn_name: "initialize",
+            args: (
+                admin.clone(),
+                token_id.clone(),
+                quorum_bps,
+                VOTING_PERIOD,
+                TIMELOCK_PERIOD,
+                PROPOSAL_THRESHOLD,
+            )
+                .into_val(env),
+            sub_invokes: &[],
+        },
+    }]);
+    GovernanceContractClient::new(env, &governance_id).initialize(
+        &admin,
+        &token_id,
+        &quorum_bps,
+        &VOTING_PERIOD,
+        &TIMELOCK_PERIOD,
+        &PROPOSAL_THRESHOLD,
+    );
+
+    (admin, token_id, governance_id)
+}
+
+#[test]
+fn create_proposal_only_requires_the_proposers_auth() {
+    let env = Env::default();
+    env.ledger().set_sequence_number(GENESIS);
+    let (admin, _token_id, governance_id) = deploy_with_explicit_auth(&env, 1_000_000, QUORUM_BPS);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+    let title = String::from_str(&env, "Fund the grants program");
+    let description = String::from_str(&env, "Allocate treasury funds to grants.");
+
+    env.mock_auths(&[MockAuth {
+        address: &admin,
+        invoke: &MockAuthInvoke {
+            contract: &governance_id,
+            fn_name: "create_proposal",
+            args: (admin.clone(), title.clone(), description.clone()).into_val(&env),
+            // No sub_invokes: create_proposal cross-invokes token.balance() and
+            // token.total_supply(), and this succeeding with an empty tree
+            // proves neither one requires auth today.
+            sub_invokes: &[],
+        },
+    }]);
+    let id = governance.create_proposal(&admin, &title, &description);
+    assert_eq!(id, 1);
+
+    let auths = env.auths();
+    assert_eq!(auths.len(), 1);
+    assert_eq!(auths[0].0, admin);
+}
+
+#[test]
+fn voting_only_requires_the_voters_auth() {
+    let env = Env::default();
+    env.ledger().set_sequence_number(GENESIS);
+    let (admin, _token_id, governance_id) = deploy_with_explicit_auth(&env, 1_000_000, QUORUM_BPS);
+    let governance = GovernanceContractClient::new(&env, &governance_id);
+    let title = String::from_str(&env, "t");
+    let description = String::from_str(&env, "d");
+
+    env.mock_auths(&[MockAuth {
+        address: &admin,
+        invoke: &MockAuthInvoke {
+            contract: &governance_id,
+            fn_name: "create_proposal",
+            args: (admin.clone(), title.clone(), description.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let id = governance.create_proposal(&admin, &title, &description);
+
+    env.ledger().set_sequence_number(GENESIS + 1);
+
+    env.mock_auths(&[MockAuth {
+        address: &admin,
+        invoke: &MockAuthInvoke {
+            contract: &governance_id,
+            fn_name: "vote",
+            args: (admin.clone(), id, VOTE_FOR).into_val(&env),
+            // No sub_invokes: vote() cross-invokes token.get_past_balance(),
+            // also not gated by auth today — same proof as above.
+            sub_invokes: &[],
+        },
+    }]);
+    governance.vote(&admin, &id, &VOTE_FOR);
+
+    let auths = env.auths();
+    assert_eq!(auths.len(), 1);
+    assert_eq!(auths[0].0, admin);
+}
+
+#[test]
+fn governance_cannot_move_a_holders_tokens() {
+    let env = Env::default();
+    env.ledger().set_sequence_number(GENESIS);
+    let (admin, token_id, governance_id) = deploy_with_explicit_auth(&env, 1_000_000, QUORUM_BPS);
+    let token = QuorumTokenClient::new(&env, &token_id);
+
+    // Fund a holder distinct from admin, under an explicit mock of the
+    // admin's own transfer call — never a blanket mock_all_auths().
+    let holder = Address::generate(&env);
+    env.mock_auths(&[MockAuth {
+        address: &admin,
+        invoke: &MockAuthInvoke {
+            contract: &token_id,
+            fn_name: "transfer",
+            args: (admin.clone(), holder.clone(), 100_000i128).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    token.transfer(&admin, &holder, &100_000);
+    assert_eq!(token.balance(&holder), 100_000);
+
+    // Nothing here mocks an approval from the holder to governance, nor any
+    // authorization for governance itself. Attempting to move the holder's
+    // tokens with the governance contract's address standing in as `spender`
+    // must fail — there is no allowance, and — the point of this test —
+    // nothing grants governance the holder's (or its own) authorization to
+    // move them regardless.
+    let attacker = Address::generate(&env);
+    let result = token.try_transfer_from(&governance_id, &holder, &attacker, &50_000);
+    assert!(result.is_err());
+    assert_eq!(token.balance(&holder), 100_000);
+    assert_eq!(token.balance(&attacker), 0);
 }

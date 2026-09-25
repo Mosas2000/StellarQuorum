@@ -855,3 +855,118 @@ fn binary_search_resolves_the_correct_entry_across_many_checkpoints() {
     assert_eq!(token.get_past_balance(&holder, &9), 0);
     assert_eq!(token.get_past_balance(&holder, &10_000), 20_000);
 }
+
+// ─── Property test: binary search vs. naive linear scan (#161) ───────────────
+
+/// Minimal, dependency-free xorshift32 PRNG. Deterministic (fixed seed) so
+/// CI failures are reproducible, but still exercises a wide spread of
+/// checkpoint-history shapes without adding a `proptest`/`rand` dependency.
+struct Xorshift32(u32);
+
+impl Xorshift32 {
+    fn next_u32(&mut self) -> u32 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.0 = x;
+        x
+    }
+
+    /// Random value in `0..bound`. `bound` must be > 0.
+    fn next_below(&mut self, bound: u32) -> u32 {
+        self.next_u32() % bound
+    }
+}
+
+/// Naive O(n) scan mirroring the contract's contract: the balance in effect
+/// at `ledger` is the most recent checkpoint at or before it, or 0 if none
+/// qualifies (including an empty history).
+fn naive_past_balance(history: &std::vec::Vec<(u32, i128)>, ledger: u32) -> i128 {
+    history
+        .iter()
+        .rev()
+        .find(|(l, _)| *l <= ledger)
+        .map(|(_, balance)| *balance)
+        .unwrap_or(0)
+}
+
+#[test]
+fn get_past_balance_matches_naive_scan_across_random_histories() {
+    let mut rng = Xorshift32(0x9E3779B9);
+
+    for _case in 0..50 {
+        let env = Env::default();
+        env.ledger().set_sequence_number(1);
+        let (_admin, token) = deploy(&env);
+        let holder = Address::generate(&env);
+
+        // 0..=25 checkpoints per history, so empty and single-entry histories
+        // are both represented across the 50 generated cases.
+        let len = rng.next_below(26);
+        let mut history: std::vec::Vec<(u32, i128)> = std::vec::Vec::new();
+        let mut ledger = 1u32;
+        let mut balance: i128 = 0;
+
+        for _ in 0..len {
+            ledger += 1 + rng.next_below(20);
+            env.ledger().set_sequence_number(ledger);
+            let delta = 1 + i128::from(rng.next_below(10_000));
+            token.mint(&holder, &delta);
+            balance += delta;
+            history.push((ledger, balance));
+        }
+
+        // Query well before, exactly on, one below, one above every
+        // checkpoint, plus random ledgers across the whole range — binary
+        // search off-by-ones hide exactly at those boundaries.
+        let mut queries: std::vec::Vec<u32> = std::vec![0, 1, ledger, ledger + 1000];
+        for &(l, _) in history.iter() {
+            queries.push(l);
+            queries.push(l.saturating_sub(1));
+            queries.push(l + 1);
+        }
+        for _ in 0..10 {
+            queries.push(rng.next_below(ledger + 50));
+        }
+
+        for query in queries {
+            let expected = naive_past_balance(&history, query);
+            assert_eq!(
+                token.get_past_balance(&holder, &query),
+                expected,
+                "history={:?} query={}",
+                history,
+                query,
+            );
+        }
+    }
+}
+
+#[test]
+fn get_past_balance_with_empty_history_is_always_zero() {
+    let env = Env::default();
+    env.ledger().set_sequence_number(1);
+    let (_admin, token) = deploy(&env);
+    let stranger = Address::generate(&env);
+
+    for query in [0u32, 1, 10, 1_000_000] {
+        assert_eq!(token.get_past_balance(&stranger, &query), 0);
+    }
+}
+
+#[test]
+fn get_past_balance_with_single_checkpoint() {
+    let env = Env::default();
+    env.ledger().set_sequence_number(1);
+    let (admin, token) = deploy(&env);
+    let holder = Address::generate(&env);
+
+    env.ledger().set_sequence_number(50);
+    token.transfer(&admin, &holder, &777);
+
+    assert_eq!(token.get_past_balance(&holder, &49), 0);
+    assert_eq!(token.get_past_balance(&holder, &50), 777);
+    assert_eq!(token.get_past_balance(&holder, &51), 777);
+    assert_eq!(token.get_past_balance(&holder, &1_000), 777);
+}
