@@ -45,6 +45,28 @@ All passed proposals enter a 48-hour timelock before execution. A guardian multi
 
 ---
 
+## Drips Wave
+
+Quorum participates in the **Stellar Wave** on [Drips Network](https://www.drips.network/wave).
+
+Open issues are sized with point labels:
+
+| Label | Scope |
+|---|---|
+| `drips:1` | Small docs, style, or good-first-issue tasks |
+| `drips:3` | Medium components, SDK methods, or test coverage |
+| `drips:5` | Larger pages, Soroban contract functions, or integrations |
+| `drips:8` | Complex feature work or security-sensitive contract changes |
+
+**Good first issues:**
+- Build the Freighter wallet connection component
+- Write the Soroban governance contract `cancel()` function
+- Add proposal search and sorting to the proposals list
+- Implement delegation UI
+- Write unit tests for the proposal data layer
+
+---
+
 ## Contributing
 
 1. Fork the repo and create a feature branch
