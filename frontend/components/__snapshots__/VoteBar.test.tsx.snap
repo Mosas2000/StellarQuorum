@@ -1,0 +1,250 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`VoteBar matches the visual baseline for a three-way split 1`] = `
+{
+  "attrs": {
+    "class": "flex flex-col gap-1.5",
+  },
+  "children": [
+    {
+      "attrs": {
+        "class": "flex h-3 rounded-full overflow-hidden gap-px",
+      },
+      "children": [
+        {
+          "attrs": {
+            "class": "bg-emerald-500 rounded-l-full",
+          },
+          "children": [],
+          "style": {
+            "width": "60%",
+          },
+          "tag": "div",
+        },
+        {
+          "attrs": {
+            "class": "bg-red-500",
+          },
+          "children": [],
+          "style": {
+            "width": "30%",
+          },
+          "tag": "div",
+        },
+        {
+          "attrs": {
+            "class": "bg-slate-500 rounded-r-full",
+          },
+          "children": [],
+          "style": {
+            "width": "10%",
+          },
+          "tag": "div",
+        },
+      ],
+      "tag": "div",
+    },
+    {
+      "attrs": {
+        "class": "flex gap-4 text-xs text-slate-400",
+      },
+      "children": [
+        {
+          "attrs": {
+            "class": "flex items-center gap-1",
+          },
+          "children": [
+            {
+              "attrs": {
+                "class": "w-2 h-2 rounded-full bg-emerald-500",
+              },
+              "children": [],
+              "tag": "span",
+            },
+            "For 60.0%",
+          ],
+          "tag": "span",
+        },
+        {
+          "attrs": {
+            "class": "flex items-center gap-1",
+          },
+          "children": [
+            {
+              "attrs": {
+                "class": "w-2 h-2 rounded-full bg-red-500",
+              },
+              "children": [],
+              "tag": "span",
+            },
+            "Against 30.0%",
+          ],
+          "tag": "span",
+        },
+        {
+          "attrs": {
+            "class": "flex items-center gap-1",
+          },
+          "children": [
+            {
+              "attrs": {
+                "class": "w-2 h-2 rounded-full bg-slate-500",
+              },
+              "children": [],
+              "tag": "span",
+            },
+            "Abstain 10.0%",
+          ],
+          "tag": "span",
+        },
+      ],
+      "tag": "div",
+    },
+  ],
+  "tag": "div",
+}
+`;
+
+exports[`VoteBar matches the visual baseline for a three-way split in compact mode 1`] = `
+{
+  "attrs": {
+    "class": "flex flex-col gap-1.5",
+  },
+  "children": [
+    {
+      "attrs": {
+        "class": "flex h-1.5 rounded-full overflow-hidden gap-px",
+      },
+      "children": [
+        {
+          "attrs": {
+            "class": "bg-emerald-500 rounded-l-full",
+          },
+          "children": [],
+          "style": {
+            "width": "60%",
+          },
+          "tag": "div",
+        },
+        {
+          "attrs": {
+            "class": "bg-red-500",
+          },
+          "children": [],
+          "style": {
+            "width": "30%",
+          },
+          "tag": "div",
+        },
+        {
+          "attrs": {
+            "class": "bg-slate-500 rounded-r-full",
+          },
+          "children": [],
+          "style": {
+            "width": "10%",
+          },
+          "tag": "div",
+        },
+      ],
+      "tag": "div",
+    },
+  ],
+  "tag": "div",
+}
+`;
+
+exports[`VoteBar matches the visual baseline when only one side has votes 1`] = `
+{
+  "attrs": {
+    "class": "flex flex-col gap-1.5",
+  },
+  "children": [
+    {
+      "attrs": {
+        "class": "flex h-3 rounded-full overflow-hidden gap-px",
+      },
+      "children": [
+        {
+          "attrs": {
+            "class": "bg-emerald-500 rounded-l-full",
+          },
+          "children": [],
+          "style": {
+            "width": "100%",
+          },
+          "tag": "div",
+        },
+      ],
+      "tag": "div",
+    },
+    {
+      "attrs": {
+        "class": "flex gap-4 text-xs text-slate-400",
+      },
+      "children": [
+        {
+          "attrs": {
+            "class": "flex items-center gap-1",
+          },
+          "children": [
+            {
+              "attrs": {
+                "class": "w-2 h-2 rounded-full bg-emerald-500",
+              },
+              "children": [],
+              "tag": "span",
+            },
+            "For 100.0%",
+          ],
+          "tag": "span",
+        },
+        {
+          "attrs": {
+            "class": "flex items-center gap-1",
+          },
+          "children": [
+            {
+              "attrs": {
+                "class": "w-2 h-2 rounded-full bg-red-500",
+              },
+              "children": [],
+              "tag": "span",
+            },
+            "Against 0.0%",
+          ],
+          "tag": "span",
+        },
+        {
+          "attrs": {
+            "class": "flex items-center gap-1",
+          },
+          "children": [
+            {
+              "attrs": {
+                "class": "w-2 h-2 rounded-full bg-slate-500",
+              },
+              "children": [],
+              "tag": "span",
+            },
+            "Abstain 0.0%",
+          ],
+          "tag": "span",
+        },
+      ],
+      "tag": "div",
+    },
+  ],
+  "tag": "div",
+}
+`;
+
+exports[`VoteBar matches the visual baseline with no votes cast 1`] = `
+{
+  "attrs": {
+    "class": "h-3 rounded-full bg-[#1a2535] w-full",
+  },
+  "children": [],
+  "tag": "div",
+}
+`;

@@ -85,8 +85,12 @@ jobs:
       - name: Lint
         run: cd frontend && npm run lint
       # Issue #177: real test script, no longer --passWithNoTests.
+      # Issue #168 / #169: --ci makes Jest refuse to write or accept a
+      # snapshot baseline, so a visual or accessibility regression fails the
+      # run instead of silently rewriting components/__snapshots__/. Refresh
+      # baselines locally with `npm run test:update` and review the diff.
       - name: Test
-        run: cd frontend && npm test
+        run: cd frontend && npm test -- --ci
       - run: cd frontend && npm run build
       # Issue #179: fails on any high/critical advisory and prints the
       # advisory + dependency path (npm audit's default human output).
