@@ -1,5 +1,16 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, contracterror, Address, Env, String};
+use soroban_sdk::{contract, contractclient, contractimpl, contracttype, contracterror, Address, Env, String, Symbol};
+
+/// Subset of the QUORUM token interface the governor depends on.
+///
+/// Generates `TokenClient`, used to cross-invoke the token contract at the
+/// address held in `Config::token`.
+#[contractclient(name = "TokenClient")]
+pub trait TokenInterface {
+    fn total_supply(env: Env) -> i128;
+    fn balance(env: Env, owner: Address) -> i128;
+    fn get_past_balance(env: Env, owner: Address, ledger: u32) -> i128;
+}
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -17,16 +28,91 @@ pub enum GovernanceError {
     InvalidVoteChoice       = 10,
     VotingPeriodEnded       = 11,
     TimelockNotExpired      = 12,
+    Overflow                = 13,
+    NoVotingPower           = 14,
+}
+
+/// Basis-point denominator: `quorum_bps` of 500 means 5% of total supply.
+const BPS_DENOMINATOR: i128 = 10_000;
+
+/// Ledgers in roughly one day, at Stellar's ~5 second close time.
+const LEDGERS_PER_DAY: u32 = 17_280;
+
+/// Bump persistent entries whose remaining life has fallen below 30 days.
+///
+/// A proposal must stay readable for its whole voting window plus the timelock
+/// plus however long anyone later wants to audit the result. The create form
+/// already offers a 30-day voting period, so the threshold has to exceed that
+/// or a long-running proposal could expire mid-vote.
+const TTL_THRESHOLD: u32 = LEDGERS_PER_DAY * 30;
+
+/// Extend qualifying entries back out to 90 days.
+const TTL_EXTEND_TO: u32 = LEDGERS_PER_DAY * 90;
+
+/// Emitted when a proposal is opened.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProposalCreated {
+    pub id: u64,
+    pub proposer: Address,
+    pub title: String,
+    pub start_ledger: u32,
+    pub end_ledger: u32,
+    pub quorum_required: i128,
+}
+
+/// Emitted for each accepted vote. `voting_power` is the weight actually
+/// counted — the voter's balance at the snapshot ledger, not their live one.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VoteCast {
+    pub proposal_id: u64,
+    pub voter: Address,
+    pub support: u32,
+    pub voting_power: i128,
+}
+
+/// Emitted when voting closes and the outcome is decided.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProposalFinalized {
+    pub id: u64,
+    pub status: ProposalStatus,
+    pub for_votes: i128,
+    pub against_votes: i128,
+    pub abstain_votes: i128,
+}
+
+/// Emitted alongside `ProposalFinalized` when a proposal passes and enters the
+/// timelock.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProposalQueued {
+    pub id: u64,
+    pub queue_ledger: u32,
 }
 
 #[contracttype]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProposalExecuted {
+    pub id: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProposalCancelled {
+    pub id: u64,
+    pub caller: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProposalStatus {
     Pending, Active, Passed, Failed, Queued, Executed, Cancelled,
 }
 
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Proposal {
     pub id: u64,
     pub proposer: Address,
@@ -84,6 +170,18 @@ impl GovernanceContract {
         let id = count + 1;
         let current = env.ledger().sequence();
         let config: Config = env.storage().instance().get(&DataKey::Config).unwrap();
+        let token = TokenClient::new(&env, &config.token);
+
+        // Gate proposal creation on a real stake, so spamming the proposal
+        // queue costs tokens. Checked against the live balance: the threshold
+        // is about who may open a proposal now, unlike voting power, which is
+        // fixed at the snapshot.
+        if token.balance(&proposer) < config.proposal_threshold {
+            return Err(GovernanceError::BelowProposalThreshold);
+        }
+
+        let quorum_required =
+            Self::quorum_for_supply(token.total_supply(), config.quorum_bps)?;
         let proposal = Proposal {
             id, proposer, title, description,
             for_votes: 0, against_votes: 0, abstain_votes: 0,
@@ -91,11 +189,25 @@ impl GovernanceContract {
             start_ledger: current + 1,
             end_ledger: current + 1 + config.voting_period,
             queue_ledger: 0,
-            quorum_required: 0, // TODO: calc from total_supply * quorum_bps / 10000
+            quorum_required,
             status: ProposalStatus::Active,
         };
         env.storage().persistent().set(&DataKey::Proposal(id), &proposal);
         env.storage().instance().set(&DataKey::ProposalCount, &id);
+        Self::touch_proposal(&env, id);
+        Self::touch_instance(&env);
+
+        env.events().publish(
+            (Symbol::new(&env, "proposal_created"), id),
+            ProposalCreated {
+                id,
+                proposer: proposal.proposer,
+                title: proposal.title,
+                start_ledger: proposal.start_ledger,
+                end_ledger: proposal.end_ledger,
+                quorum_required: proposal.quorum_required,
+            },
+        );
         Ok(id)
     }
 
@@ -109,14 +221,30 @@ impl GovernanceContract {
             .get(&DataKey::Proposal(proposal_id)).ok_or(GovernanceError::ProposalNotFound)?;
         if env.ledger().sequence() > proposal.end_ledger { return Err(GovernanceError::VotingPeriodEnded); }
         if proposal.status != ProposalStatus::Active { return Err(GovernanceError::VotingNotActive); }
-        let voting_power: i128 = 0; // TODO: get from token contract at snapshot_ledger
-        match support {
-            0 => proposal.against_votes += voting_power,
-            1 => proposal.for_votes += voting_power,
-            _ => proposal.abstain_votes += voting_power,
-        }
+
+        // Power is read at the proposal's snapshot ledger, not live, so tokens
+        // bought or borrowed after the proposal opened carry no weight.
+        let config: Config = env.storage().instance().get(&DataKey::Config).unwrap();
+        let voting_power = TokenClient::new(&env, &config.token)
+            .get_past_balance(&voter, &proposal.snapshot_ledger);
+        if voting_power <= 0 { return Err(GovernanceError::NoVotingPower); }
+
+        let tally = match support {
+            0 => &mut proposal.against_votes,
+            1 => &mut proposal.for_votes,
+            _ => &mut proposal.abstain_votes,
+        };
+        *tally = Self::add_weight(*tally, voting_power)?;
         env.storage().persistent().set(&DataKey::Proposal(proposal_id), &proposal);
-        env.storage().persistent().set(&DataKey::HasVoted(proposal_id, voter), &support);
+        env.storage().persistent().set(&DataKey::HasVoted(proposal_id, voter.clone()), &support);
+        Self::touch_proposal(&env, proposal_id);
+        Self::touch_vote(&env, proposal_id, &voter);
+        Self::touch_instance(&env);
+
+        env.events().publish(
+            (Symbol::new(&env, "vote_cast"), proposal_id, voter.clone()),
+            VoteCast { proposal_id, voter, support, voting_power },
+        );
         Ok(())
     }
 
@@ -134,6 +262,26 @@ impl GovernanceContract {
         } else { ProposalStatus::Failed };
         let status = proposal.status.clone();
         env.storage().persistent().set(&DataKey::Proposal(proposal_id), &proposal);
+        Self::touch_proposal(&env, proposal_id);
+
+        env.events().publish(
+            (Symbol::new(&env, "proposal_finalized"), proposal_id),
+            ProposalFinalized {
+                id: proposal_id,
+                status: status.clone(),
+                for_votes: proposal.for_votes,
+                against_votes: proposal.against_votes,
+                abstain_votes: proposal.abstain_votes,
+            },
+        );
+        // A second event on the passing path, so indexers can watch the
+        // timelock without re-reading the proposal to learn queue_ledger.
+        if status == ProposalStatus::Queued {
+            env.events().publish(
+                (Symbol::new(&env, "proposal_queued"), proposal_id),
+                ProposalQueued { id: proposal_id, queue_ledger: proposal.queue_ledger },
+            );
+        }
         Ok(status)
     }
 
@@ -144,12 +292,26 @@ impl GovernanceContract {
         if env.ledger().sequence() < proposal.queue_ledger { return Err(GovernanceError::TimelockNotExpired); }
         proposal.status = ProposalStatus::Executed;
         env.storage().persistent().set(&DataKey::Proposal(proposal_id), &proposal);
+        Self::touch_proposal(&env, proposal_id);
         // TODO: dispatch on-chain actions encoded in proposal
+
+        env.events().publish(
+            (Symbol::new(&env, "proposal_executed"), proposal_id),
+            ProposalExecuted { id: proposal_id },
+        );
         Ok(())
     }
 
     pub fn get_proposal(env: Env, id: u64) -> Result<Proposal, GovernanceError> {
-        env.storage().persistent().get(&DataKey::Proposal(id)).ok_or(GovernanceError::ProposalNotFound)
+        let proposal: Proposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Proposal(id))
+            .ok_or(GovernanceError::ProposalNotFound)?;
+        // Reading keeps an entry alive: an actively watched proposal should not
+        // expire just because nobody has voted on it lately.
+        Self::touch_proposal(&env, id);
+        Ok(proposal)
     }
 
     pub fn get_proposal_count(env: Env) -> u64 {
@@ -158,6 +320,15 @@ impl GovernanceContract {
 
     pub fn has_voted(env: Env, proposal_id: u64, voter: Address) -> bool {
         env.storage().persistent().has(&DataKey::HasVoted(proposal_id, voter))
+    }
+
+    /// The choice `voter` recorded on `proposal_id` — 0 Against, 1 For,
+    /// 2 Abstain — or `None` if they have not voted.
+    ///
+    /// `vote()` already stores the support value; this exposes it so clients
+    /// can show *how* a wallet voted rather than only whether it did.
+    pub fn get_vote(env: Env, proposal_id: u64, voter: Address) -> Option<u32> {
+        env.storage().persistent().get(&DataKey::HasVoted(proposal_id, voter))
     }
 
     pub fn get_config(env: Env) -> Config {
@@ -174,8 +345,70 @@ impl GovernanceContract {
         }
         proposal.status = ProposalStatus::Cancelled;
         env.storage().persistent().set(&DataKey::Proposal(proposal_id), &proposal);
+        Self::touch_proposal(&env, proposal_id);
+
+        env.events().publish(
+            (Symbol::new(&env, "proposal_cancelled"), proposal_id),
+            ProposalCancelled { id: proposal_id, caller },
+        );
         Ok(())
     }
 }
+/// Internal helpers — outside `#[contractimpl]` so they are not exported as
+/// contract functions.
+impl GovernanceContract {
+    /// Quorum threshold for a given circulating supply: `supply * bps / 10000`.
+    ///
+    /// Integer division truncates, so the threshold is never rounded up beyond
+    /// what the supply supports. Uses checked arithmetic because a large supply
+    /// multiplied by `quorum_bps` can exceed `i128::MAX`.
+    /// Extends the TTL of a proposal entry so a long voting window cannot
+    /// outlive its own storage.
+    fn touch_proposal(env: &Env, id: u64) {
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Proposal(id), TTL_THRESHOLD, TTL_EXTEND_TO);
+    }
+
+    /// Extends the TTL of a recorded vote, so `has_voted` and `get_vote` keep
+    /// answering for as long as the proposal itself survives.
+    fn touch_vote(env: &Env, id: u64, voter: &Address) {
+        env.storage().persistent().extend_ttl(
+            &DataKey::HasVoted(id, voter.clone()),
+            TTL_THRESHOLD,
+            TTL_EXTEND_TO,
+        );
+    }
+
+    /// Extends the TTL of instance storage, which holds Config and the proposal
+    /// counter. If this expired the contract would lose its configuration.
+    fn touch_instance(env: &Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(TTL_THRESHOLD, TTL_EXTEND_TO);
+    }
+
+    /// Adds `weight` to a running vote tally.
+    ///
+    /// Returns `Overflow` rather than trapping. Token supply bounds the sum of
+    /// all balances to `i128::MAX`, so an honest tally cannot overflow today —
+    /// but nothing in the contract *enforces* that invariant, and a trap in
+    /// `vote()` would be an unrecoverable panic rather than an error a caller
+    /// can handle.
+    fn add_weight(tally: i128, weight: i128) -> Result<i128, GovernanceError> {
+        tally.checked_add(weight).ok_or(GovernanceError::Overflow)
+    }
+
+    fn quorum_for_supply(total_supply: i128, quorum_bps: u32) -> Result<i128, GovernanceError> {
+        total_supply
+            .checked_mul(i128::from(quorum_bps))
+            .map(|scaled| scaled / BPS_DENOMINATOR)
+            .ok_or(GovernanceError::Overflow)
+    }
+}
+
+#[cfg(test)]
+mod test;
+
 // TODO: add delegate() for voting power delegation
 // TODO: add get_past_votes(address, ledger) for snapshot-based power

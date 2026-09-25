@@ -15,8 +15,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+          components: clippy
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            contracts/target
+          key: cargo-${{ hashFiles('contracts/Cargo.lock') }}
+          restore-keys: cargo-
       - name: Build contracts
         run: cd contracts && cargo build --target wasm32-unknown-unknown --release
+      - name: Clippy
+        run: cd contracts && cargo clippy --all-targets --all-features -- -D warnings
       - name: Run contract tests
         run: cd contracts && cargo test
 
@@ -29,13 +41,14 @@ jobs:
         with:
           node-version: 20
           cache: npm
+          cache-dependency-path: frontend/package-lock.json
       - name: Cache Next.js build
         uses: actions/cache@v4
         with:
           path: frontend/.next/cache
-          key: nextjs-${{ hashFiles("frontend/package-lock.json") }}
-      - run: npm ci
-      - run: npm run build
+          key: nextjs-${{ hashFiles('frontend/package-lock.json') }}
+      - run: cd frontend && npm ci
+      - run: cd frontend && npm run build
 
   sdk:
     name: Build SDK

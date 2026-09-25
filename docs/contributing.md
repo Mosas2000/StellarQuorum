@@ -63,6 +63,19 @@ they may not be tracked correctly by Drips Wave automation.
 - Pin a "Drips Wave active" issue during active sprint cycles.
 - Keep this guide updated if the reward program or sprint cadence changes.
 
+### Point Labels
+
+Maintainers use `drips:*` labels to show the expected reward size before work starts:
+
+| Label | Typical scope |
+|---|---|
+| `drips:1` | Small documentation, style, copy, or good-first-issue fixes |
+| `drips:3` | Medium UI components, focused SDK work, or test coverage |
+| `drips:5` | Larger pages, contract functions, or multi-file integrations |
+| `drips:8` | Complex features, security-sensitive contract work, or full workflows |
+
+If an issue is missing a point label, ask for sizing before opening a PR. During an active sprint, maintainers should pin a Drips Wave tracking issue that lists the eligible tasks for that cycle.
+
 ## Code Style
 - TypeScript: strict mode, no `any`
 - Rust: follow Soroban SDK patterns, use `Result<T, Error>` over `panic!()`
