@@ -1,0 +1,18 @@
+# cargo-audit configuration (Issue #178).
+#
+# Advisories are NOT silenced here by default — `cargo audit` in CI fails
+# the build on any advisory in contracts/Cargo.lock. If an advisory is
+# accepted as a false positive or not applicable to how this crate uses
+# the dependency, add it to `ignore` below with a rationale comment
+# explaining why, and a link to the advisory.
+#
+# Example:
+#   [advisories]
+#   ignore = [
+#     # RUSTSEC-2024-0000: only affects the `foo` feature, which this
+#     # workspace never enables. https://rustsec.org/advisories/RUSTSEC-2024-0000
+#     "RUSTSEC-2024-0000",
+#   ]
+
+[advisories]
+ignore = []

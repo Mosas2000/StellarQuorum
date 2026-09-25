@@ -31,6 +31,14 @@ jobs:
         run: cd contracts && cargo clippy --all-targets --all-features -- -D warnings
       - name: Run contract tests
         run: cd contracts && cargo test
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+      # Issue #178: fails the build on any RUSTSEC advisory in
+      # contracts/Cargo.lock. Accepted exceptions go in contracts/audit.toml
+      # (with a rationale comment), not as a CLI flag here, so they're
+      # visible in a normal code review instead of buried in workflow YAML.
+      - name: cargo audit
+        run: cd contracts && cargo audit --config audit.toml
 
   frontend:
     name: Build Frontend
@@ -48,7 +56,18 @@ jobs:
           path: frontend/.next/cache
           key: nextjs-${{ hashFiles('frontend/package-lock.json') }}
       - run: cd frontend && npm ci
+      # Issue #176: lint was declared but never run in CI, so violations
+      # reached main freely.
+      - name: Lint
+        run: cd frontend && npm run lint
+      # Issue #177: real test script, no longer --passWithNoTests.
+      - name: Test
+        run: cd frontend && npm test
       - run: cd frontend && npm run build
+      # Issue #179: fails on any high/critical advisory and prints the
+      # advisory + dependency path (npm audit's default human output).
+      - name: npm audit (high + critical)
+        run: cd frontend && npm audit --audit-level=high
 
   sdk:
     name: Build SDK
@@ -60,3 +79,7 @@ jobs:
           node-version: 20
       - run: cd sdk && npm ci
       - run: cd sdk && npm run build
+      # Issue #179: sdk/ currently has two known high-severity advisories
+      # with no automated check surfacing them.
+      - name: npm audit (high + critical)
+        run: cd sdk && npm audit --audit-level=high

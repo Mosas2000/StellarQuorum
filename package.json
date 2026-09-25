@@ -9,7 +9,7 @@
     "build:sdk": "cd sdk && npm run build",
     "build:contracts": "cd contracts && cargo build --target wasm32-unknown-unknown --release",
     "lint": "cd frontend && npm run lint",
-    "test": "cd frontend && npm test -- --passWithNoTests"
+    "test": "cd frontend && npm test"
   },
   "engines": {
     "node": ">=18"
