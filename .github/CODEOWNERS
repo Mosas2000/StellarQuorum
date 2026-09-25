@@ -1,0 +1,24 @@
+# StellarQuorum CODEOWNERS
+# Automatically requests review from code owners based on modified paths.
+# See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Global fallback for all files
+* @sanmipaul
+
+# Smart Contracts (Soroban contracts: governance, token, tests)
+/contracts/ @sanmipaul
+
+# Frontend UI (Next.js application, components, lib)
+/frontend/ @sanmipaul
+
+# TypeScript SDK (@quorum/sdk)
+/sdk/ @sanmipaul
+
+# CI/CD Workflows, GitHub configuration, and automation
+/.github/ @sanmipaul
+
+# Integration test suites
+/tests/ @sanmipaul
+
+# Documentation
+/docs/ @sanmipaul
