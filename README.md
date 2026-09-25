@@ -1,5 +1,8 @@
 # Quorum
 
+[![CI](https://github.com/StellarQuorum/StellarQuorum/actions/workflows/ci.yml/badge.svg)](https://github.com/StellarQuorum/StellarQuorum/actions/workflows/ci.yml)
+[![contracts coverage](https://codecov.io/gh/StellarQuorum/StellarQuorum/branch/main/graph/badge.svg?flag=contracts)](https://codecov.io/gh/StellarQuorum/StellarQuorum)
+
 Stellar Quorum is an open-source governance infrastructure layer for the Stellar and Soroban ecosystem. It provides the core primitives for decentralized, token-weighted decision-making: proposal creation, on-chain voting, delegation, timelock execution, and transparent result reporting.
 
 As Stellar moves from a foundation-driven upgrade model to community-driven governance, the ecosystem needs reliable, auditable governance tooling that DeFi protocols, DAOs and community organizations can adopt without building from scratch.

@@ -31,6 +31,30 @@ jobs:
         run: cd contracts && cargo clippy --all-targets --all-features -- -D warnings
       - name: Run contract tests
         run: cd contracts && cargo test
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      # Issue #160: measures what the contract test suite actually exercises.
+      # 70% is the agreed baseline — comfortably below current coverage so
+      # this doesn't block in-flight work, but high enough to catch a
+      # whole untested module landing silently. Raise it over time rather
+      # than lower it.
+      - name: Contract test coverage
+        run: |
+          cd contracts
+          cargo llvm-cov --workspace --lcov --output-path lcov.info
+          cargo llvm-cov report --fail-under-lines 70
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: contracts-coverage-lcov
+          path: contracts/lcov.info
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: contracts/lcov.info
+          flags: contracts
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
       - name: Install cargo-audit
         uses: taiki-e/install-action@cargo-audit
       # Issue #178: fails the build on any RUSTSEC advisory in
