@@ -9,6 +9,7 @@ Thank you for your interest in contributing to Quorum — on-chain governance in
 - [Project Structure](#project-structure)
 - [Getting Started](#getting-started)
 - [Development Setup](#development-setup)
+- [Running Tests](#running-tests)
 - [Contribution Workflow](#contribution-workflow)
 - [Contributing to Contracts](#contributing-to-contracts)
 - [Contributing to the Frontend](#contributing-to-the-frontend)
@@ -107,6 +108,137 @@ npm test          # Run SDK tests
 
 ---
 
+## Running Tests
+
+All test suites and verification checks must pass before opening or merging a pull request. Below is the authoritative guide to running every test suite in the repository, matching the commands executed in GitHub Actions CI.
+
+### Test Suites Overview
+
+| Suite | Scope / Package | Primary Command | CI Equivalent |
+|---|---|---|---|
+| **Contracts** | Unit and integration tests for Soroban contracts (`contracts/governance`, `contracts/token`) | `cd contracts && cargo test` | `cargo test` |
+| **Frontend** | Unit and component tests for Next.js app (`frontend/`) | `cd frontend && npm test` | `npm test` |
+| **SDK** | Client SDK tests (`sdk/`) | `cd sdk && npm test` | `npm test` |
+| **Integration Stubs** | Integration test stubs (`tests/`) | `cd frontend && npx jest ../tests` | `npx jest tests/` |
+
+### Prerequisites and Toolchains
+
+To run all test suites locally, ensure you have the following toolchains installed:
+
+| Tool | Required Version | Setup Command | Used By |
+|---|---|---|---|
+| **Rust** | `stable` | `rustup default stable` | Smart contracts |
+| **WASM Target** | `wasm32-unknown-unknown` | `rustup target add wasm32-unknown-unknown` | Smart contract compilation |
+| **Clippy** | stable | `rustup component add clippy` | Rust linting |
+| **cargo-audit** | latest | `cargo install cargo-audit` | Security vulnerability auditing |
+| **Node.js** | ≥ 18 (CI uses 20) | `nvm install 20 && nvm use 20` | Frontend, SDK, integration tests |
+| **npm** | ≥ 9 | Bundled with Node.js | Package management |
+| **Stellar CLI** | latest | `cargo install stellar-cli --features opt` | Contract CLI invocations |
+
+### 1. Smart Contracts (`contracts/`)
+
+The contract test suite tests proposal lifecycle management, token checkpointing, allowance mechanisms, vote tallying, quorum calculations, and timelock logic using `soroban-sdk::testutils`.
+
+#### Run All Contract Tests
+```bash
+cd contracts
+cargo test
+```
+
+#### Run Tests for a Specific Contract
+```bash
+# Governance contract only (proposal creation, voting, execution, timelock)
+cd contracts && cargo test -p quorum-governance
+
+# Token contract only (minting, transfers, allowances, checkpoints)
+cd contracts && cargo test -p quorum-token
+```
+
+#### Run a Single Test by Name
+```bash
+cd contracts && cargo test test_initialize
+```
+
+#### Full CI Verification (Build, Clippy, Test, Audit)
+These commands match the CI workflow defined in `.github/workflows/ci.yml`:
+```bash
+cd contracts
+cargo build --target wasm32-unknown-unknown --release
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test
+cargo audit --config audit.toml
+```
+
+### 2. Frontend (`frontend/`)
+
+The frontend test suite uses Jest and `@testing-library/react` via Next.js's built-in `next/jest` preset to test utility functions, proposal data lookup, and UI components.
+
+#### Run Frontend Tests
+```bash
+cd frontend
+npm test
+```
+
+#### Run Tests in Watch Mode
+```bash
+cd frontend
+npm test -- --watch
+```
+
+#### Full CI Verification (Lint, Test, Build, Audit)
+These commands match the CI workflow defined in `.github/workflows/ci.yml`:
+```bash
+cd frontend
+npm ci
+npm run lint
+npm test
+npm run build
+npm audit --audit-level=high
+```
+
+### 3. TypeScript SDK (`sdk/`)
+
+The SDK suite verifies typed client methods, RPC simulation wrappers, and transaction builder helpers.
+
+#### Run SDK Tests
+```bash
+cd sdk
+npm test
+```
+
+#### Full CI Verification (Build, Test, Audit)
+These commands match the CI workflow defined in `.github/workflows/ci.yml`:
+```bash
+cd sdk
+npm ci
+npm run build
+npm test
+npm run lint
+npm audit --audit-level=high
+```
+
+### 4. Integration Test Stubs (`tests/`)
+
+The repository includes integration test stubs in `tests/` covering governance quorum calculations and proposal lookup:
+
+```bash
+cd frontend
+npx jest ../tests
+```
+
+### Workspace Root Helpers
+
+For convenience, the root `package.json` provides scripts to run individual suites from the workspace root:
+
+```bash
+npm run test:contracts   # cd contracts && cargo test
+npm run test:frontend    # cd frontend && npm test
+npm run test:sdk         # cd sdk && npm test
+npm test                 # runs frontend tests (default)
+```
+
+---
+
 ## Contribution Workflow
 
 1. **Find an issue** — Browse [open issues](https://github.com/StellarQuorum/StellarQuorum/issues) or create one describing your proposed change
@@ -174,8 +306,9 @@ mod tests {
 ```bash
 cd contracts
 cargo build --target wasm32-unknown-unknown --release
+cargo clippy --all-targets --all-features -- -D warnings
 cargo test
-cargo clippy -- -D warnings
+cargo audit --config audit.toml
 ```
 
 ---
@@ -228,9 +361,11 @@ Every PR touching the frontend must:
 ```bash
 cd frontend
 npm test                    # Unit tests
-npm run test:coverage       # With coverage report
-npx playwright test         # E2E tests (requires dev server running)
+npm run lint                # Linter
+npm run build               # Verify production build
 ```
+
+See [Running Tests](#running-tests) for the complete list of test suites and CI-matching commands.
 
 ---
 
